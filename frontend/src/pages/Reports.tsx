@@ -28,7 +28,7 @@ const Reports = () => {
         setReportData(preview);
       }
     } catch (err) {
-      console.error(err);
+      /* silently ignore */
       toast.error("Failed to load report data.");
     } finally {
       setLoading(false);

@@ -1,8 +1,6 @@
 from __future__ import annotations
 import base64
-import io
 import json
-import os
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -475,7 +473,6 @@ async def run_data_pipeline(dataset_id: str, body: PipelineReq, cache: CacheServ
 async def run_analytics(dataset_id: str, body: AnalyticsReq, cache: CacheService = Depends(get_cache)):
     df, schema = await _get_df_and_schema(dataset_id, cache)
     num_cols = [c["name"] for c in schema.get("columns",[]) if c.get("inferred_type") == "numeric"]
-    cat_cols = [c["name"] for c in schema.get("columns",[]) if c.get("inferred_type") == "categorical"]
     cfg = body.config
 
     if body.analysis_type == "kpis":

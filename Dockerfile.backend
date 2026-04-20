@@ -4,7 +4,8 @@ FROM python:3.11-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential gcc g++ libpq-dev curl \
@@ -12,16 +13,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Layer caching — requirements change rarely
 COPY requirements.txt ./
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
-    && pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
+    && pip install emergentintegrations \
+        --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
 
+# Application code
 COPY backend ./backend
 
-RUN mkdir -p /tmp/uploads /tmp/faiss_indexes
+RUN mkdir -p /tmp/uploads /tmp/faiss_indexes \
+    && useradd -ms /bin/bash app \
+    && chown -R app:app /app /tmp/uploads /tmp/faiss_indexes
 
-ENV PYTHONPATH=/app
+USER app
 
 EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

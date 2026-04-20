@@ -56,7 +56,7 @@ export const TopBar = ({
           }
         }
       } catch (err) {
-        console.error("Failed to fetch datasets", err);
+        /* silently ignore */
       }
     };
     fetchDatasets();

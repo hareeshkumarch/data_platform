@@ -81,9 +81,16 @@ class LLMService:
         self._cache = cache
         self._sem = asyncio.Semaphore(settings.LLM_PARALLEL_CALLS)
         self._stats = LLMStats()
+        # Prefer Emergent universal key; fall back to direct-provider keys
         self._api_key = settings.EMERGENT_LLM_KEY
-        if not self._api_key:
-            logger.warning("EMERGENT_LLM_KEY is not set — LLM calls will fail.")
+        self._direct_keys = {
+            "openai": settings.OPENAI_API_KEY,
+            "anthropic": settings.ANTHROPIC_API_KEY,
+            "gemini": settings.GEMINI_API_KEY,
+        }
+        self._using_emergent = bool(self._api_key)
+        if not self._api_key and not any(self._direct_keys.values()):
+            logger.warning("No LLM keys configured — set EMERGENT_LLM_KEY or provider-specific keys.")
 
     # ---- public API --------------------------------------------------------
 
@@ -140,30 +147,40 @@ class LLMService:
     async def stream_complete(self, request: LLMRequest) -> AsyncIterator[str]:
         """Stream tokens directly from the LLM provider as they arrive.
 
-        Uses ``litellm.acompletion(stream=True)`` with the Emergent proxy so we
-        get true token-level streaming for OpenAI/Anthropic/Gemini. Falls back
-        to word-chunking if streaming fails.
+        Uses ``litellm.acompletion(stream=True)`` against either the Emergent
+        proxy or a direct-provider key. Falls back to word-chunking if the
+        stream errors.
         """
-        if not self._api_key:
-            raise RuntimeError("EMERGENT_LLM_KEY not configured.")
         provider, model = self._resolve(request)
-        app_identifier = get_app_identifier()
-        headers = {"X-App-ID": app_identifier} if app_identifier else {}
+        direct_key = self._direct_keys.get(provider)
+        if not self._api_key and not direct_key:
+            raise RuntimeError("No LLM key configured for provider: " + provider)
 
         params: Dict[str, Any] = {
-            "model": model if provider != "gemini" else f"gemini/{model}",
             "messages": [
                 {"role": "system", "content": request.system_prompt or "You are Lumen, a helpful data intelligence assistant."},
                 {"role": "user", "content": request.prompt},
             ],
-            "api_key": self._api_key,
-            "api_base": get_integration_proxy_url() + "/llm",
-            "custom_llm_provider": "openai",
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "stream": True,
-            "extra_headers": headers,
         }
+
+        if self._api_key:
+            app_identifier = get_app_identifier()
+            headers = {"X-App-ID": app_identifier} if app_identifier else {}
+            params.update({
+                "model": model if provider != "gemini" else f"gemini/{model}",
+                "api_key": self._api_key,
+                "api_base": get_integration_proxy_url() + "/llm",
+                "custom_llm_provider": "openai",
+                "extra_headers": headers,
+            })
+        else:
+            params.update({
+                "model": model if provider == "openai" else f"{provider}/{model}",
+                "api_key": direct_key,
+            })
 
         start = time.perf_counter()
         full_text = ""
@@ -222,15 +239,30 @@ class LLMService:
         return provider, model
 
     async def _call(self, request: LLMRequest, provider: str, model: str) -> str:
-        if not self._api_key:
-            raise RuntimeError("EMERGENT_LLM_KEY not configured.")
-        chat = LlmChat(
-            api_key=self._api_key,
-            session_id=f"lumen-{uuid.uuid4().hex[:12]}",
-            system_message=request.system_prompt or "You are Lumen, a helpful data intelligence assistant.",
-        ).with_model(provider, model)
-        message = UserMessage(text=request.prompt)
-        return await chat.send_message(message) or ""
+        direct_key = self._direct_keys.get(provider)
+        if self._api_key:
+            chat = LlmChat(
+                api_key=self._api_key,
+                session_id=f"lumen-{uuid.uuid4().hex[:12]}",
+                system_message=request.system_prompt or "You are Lumen, a helpful data intelligence assistant.",
+            ).with_model(provider, model)
+            message = UserMessage(text=request.prompt)
+            return await chat.send_message(message) or ""
+        if direct_key:
+            # Fallback: call provider directly via litellm with its own API key
+            params: Dict[str, Any] = {
+                "model": f"{provider}/{model}" if provider != "openai" else model,
+                "messages": [
+                    {"role": "system", "content": request.system_prompt or "You are Lumen, a helpful data intelligence assistant."},
+                    {"role": "user", "content": request.prompt},
+                ],
+                "api_key": direct_key,
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            }
+            resp = await litellm.acompletion(**params)
+            return resp.choices[0].message.content or ""
+        raise RuntimeError("No LLM key configured (EMERGENT_LLM_KEY or provider API key).")
 
     @staticmethod
     def _cache_key(req: LLMRequest) -> str:

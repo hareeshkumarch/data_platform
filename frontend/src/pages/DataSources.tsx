@@ -1,6 +1,9 @@
 import { AppShell } from "@/components/layout/AppShell";
 import { useState, useCallback, useEffect } from "react";
-import { Upload, FileText, CheckCircle2, X, Database, Files, Sparkles } from "lucide-react";
+import {
+  Upload, FileText, CheckCircle2, X, Database, Files, Sparkles, Wand2, Activity, TrendingUp,
+  AlertTriangle,
+} from "lucide-react";
 import { MetricTile } from "@/components/cards/MetricTile";
 import { cn } from "@/lib/utils";
 import { API_BASE, apiFetch, pollTask } from "@/lib/api-client";
@@ -11,29 +14,56 @@ import { useDatasetStore } from "@/store/useDatasetStore";
 const MAX_FILE_SIZE_MB = 500;
 const ACCEPTED_TYPES = ".csv,.json,.parquet,.xlsx,.xls";
 
+interface DemoKind {
+  kind: string;
+  label: string;
+  description: string;
+}
+
+interface DatasetStats {
+  dataset_id: string;
+  name: string;
+  row_count: number;
+  col_count: number;
+  numeric_columns: number;
+  text_columns: number;
+  missing_cells: number;
+  duplicate_rows: number;
+  quality_score: number;
+  top_category: { column: string; values: Array<{ label: string; count: number }> } | Record<string, never>;
+  numeric_summary: Array<{ column: string; total: number; mean: number; min: number; max: number }>;
+  sample_rows: Array<Record<string, unknown>>;
+}
+
+interface CleaningSuggestion {
+  op: string;
+  columns: string[] | null;
+  params?: Record<string, unknown>;
+  label: string;
+}
+
 const DataSources = () => {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [demoLoading, setDemoLoading] = useState(false);
+  const [busyKind, setBusyKind] = useState<string | null>(null);
   const [drag, setDrag] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [schema, setSchema] = useState<DatasetPreview | null>(null);
+  const [stats, setStats] = useState<DatasetStats | null>(null);
+  const [suggestions, setSuggestions] = useState<CleaningSuggestion[]>([]);
+  const [catalogue, setCatalogue] = useState<DemoKind[]>([]);
+  const [cleaning, setCleaning] = useState(false);
   const { invalidate: invalidateStore } = useDatasetStore();
 
   const fetchDatasets = useCallback(async () => {
     try {
-      const resp = await apiFetch<{ datasets: any[] }>("/datasets");
-      const mapped = (resp.datasets || []).map((d: any) => ({
-        ...d,
-        id: d.id || d.dataset_id
-      }));
+      const resp = await apiFetch<{ datasets: Dataset[] }>("/datasets");
+      const mapped = (resp.datasets ?? []).map((d) => ({ ...d, id: d.id || (d as unknown as { dataset_id: string }).dataset_id }));
       setDatasets(mapped);
-      if (mapped.length > 0 && !selectedId) {
-        setSelectedId(mapped[0].id);
-      }
-    } catch (err) {
+      if (mapped.length > 0 && !selectedId) setSelectedId(mapped[0].id);
+    } catch {
       toast.error("Failed to load datasets");
     } finally {
       setLoading(false);
@@ -41,332 +71,375 @@ const DataSources = () => {
   }, [selectedId]);
 
   const fetchSchema = async (id: string) => {
-    try {
-      const data = await apiFetch<DatasetPreview>(`/schema/${id}`);
-      setSchema(data);
-    } catch (err) {
-      setSchema(null);
-    }
+    const [schemaData, statsData, sugg] = await Promise.allSettled([
+      apiFetch<DatasetPreview>(`/schema/${id}`),
+      apiFetch<DatasetStats>(`/datasets/${id}/stats`),
+      apiFetch<{ suggestions: CleaningSuggestion[] }>(`/cleaning/suggestions/${id}`),
+    ]);
+    setSchema(schemaData.status === "fulfilled" ? schemaData.value : null);
+    setStats(statsData.status === "fulfilled" ? statsData.value : null);
+    setSuggestions(sugg.status === "fulfilled" ? sugg.value.suggestions : []);
   };
 
-  useEffect(() => {
-    fetchDatasets();
-  }, [fetchDatasets]);
+  useEffect(() => { void fetchDatasets(); }, [fetchDatasets]);
+  useEffect(() => { if (selectedId) void fetchSchema(selectedId); }, [selectedId]);
 
   useEffect(() => {
-    if (selectedId) fetchSchema(selectedId);
-  }, [selectedId]);
+    apiFetch<{ datasets: DemoKind[] }>("/datasets/demo-catalogue")
+      .then((d) => setCatalogue(d.datasets))
+      .catch(() => setCatalogue([]));
+  }, []);
 
   const onUpload = useCallback(async (file: File) => {
-    // Client-side file size check (#35)
     if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
       toast.error(`File too large. Maximum size is ${MAX_FILE_SIZE_MB} MB.`);
       return;
     }
-    // Client-side file type check
     const ext = file.name.split(".").pop()?.toLowerCase();
     if (!ext || !["csv", "json", "parquet", "xlsx", "xls"].includes(ext)) {
       toast.error("Unsupported file type. Please upload CSV, JSON, Parquet, or Excel files.");
       return;
     }
-
-    if (uploading) return;  // Guard against concurrent uploads (#63)
+    if (uploading) return;
     setUploading(true);
     setUploadProgress(0);
     const formData = new FormData();
     formData.append("file", file);
-    
+
     try {
-      // Upload with progress tracking via XMLHttpRequest (#36)
       const uploadResult = await new Promise<{ task_id: string; dataset_id: string }>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", `${API_BASE}/upload-data`);
         xhr.setRequestHeader("Accept", "application/json");
         xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            setUploadProgress(Math.round((e.loaded / e.total) * 100));
-          }
+          if (e.lengthComputable) setUploadProgress(Math.round((e.loaded / e.total) * 100));
         };
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
-            try { resolve(JSON.parse(xhr.responseText)); }
-            catch { reject(new Error("Invalid response")); }
+            try { resolve(JSON.parse(xhr.responseText)); } catch { reject(new Error("Invalid response")); }
           } else {
-            try {
-              const err = JSON.parse(xhr.responseText);
-              reject(new Error(err.detail || `Upload failed (${xhr.status})`));
-            } catch { reject(new Error(`Upload failed (${xhr.status})`)); }
+            try { const err = JSON.parse(xhr.responseText); reject(new Error(err.detail || `Upload failed (${xhr.status})`)); }
+            catch { reject(new Error(`Upload failed (${xhr.status})`)); }
           }
         };
         xhr.onerror = () => reject(new Error("Network error during upload"));
         xhr.send(formData);
       });
-      
-      const data = uploadResult;
+
       setUploadProgress(100);
-      toast.info(`Processing ${file.name}...`);
-
-      // Inject ghost entry
-      setDatasets(prev => [{
-        id: data.dataset_id,
-        filename: file.name,
-        created_at: new Date().toISOString(),
-        status: "processing"
-      } as any, ...prev]);
-
-      // Wait for ingestion and check success (#7)
-      const ingestResult = await pollTask<{ success: boolean; error?: string }>(data.task_id);
-      if (ingestResult && !ingestResult.success) {
-        throw new Error(ingestResult.error || "Ingestion failed");
-      }
-      
-      // Automatic EDA — poll the task (#21/#30)
-      toast.info("Running automatic data analysis...");
-      const processResp = await apiFetch<{ task_id: string }>(`/process-data/${data.dataset_id}`, {
-        method: "POST",
-        body: JSON.stringify({
-          run_anomaly_detection: true,
-          run_time_series: false
-        })
-      });
-      if (processResp.task_id) {
-        await pollTask(processResp.task_id);
-      }
-      
-      toast.success("Dataset ready for analysis!");
-      fetchDatasets();
-      invalidateStore(); // Notify all consumers (#57)
+      toast.info(`Processing ${file.name}…`);
+      const ingestResult = await pollTask<{ success: boolean; error?: string }>(uploadResult.task_id);
+      if (ingestResult && !ingestResult.success) throw new Error(ingestResult.error || "Ingestion failed");
+      toast.success(`"${file.name}" ingested successfully`);
+      invalidateStore?.();
+      setSelectedId(uploadResult.dataset_id);
+      await fetchDatasets();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
-      fetchDatasets();
     } finally {
       setUploading(false);
       setUploadProgress(0);
     }
-  }, [fetchDatasets, uploading, invalidateStore]);
+  }, [uploading, fetchDatasets, invalidateStore]);
+
+  const seedDemo = async (kind: string) => {
+    if (busyKind) return;
+    setBusyKind(kind);
+    try {
+      toast.info("Generating synthetic dataset…");
+      const resp = await apiFetch<{ dataset_id: string; task_id: string; filename: string }>(
+        `/datasets/seed-demo/${kind}`,
+        { method: "POST" },
+      );
+      const result = await pollTask<{ success: boolean; error?: string }>(resp.task_id);
+      if (result && !result.success) throw new Error(result.error || "Demo ingestion failed");
+      toast.success("Demo dataset ready!");
+      setSelectedId(resp.dataset_id);
+      await fetchDatasets();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Demo seed failed");
+    } finally {
+      setBusyKind(null);
+    }
+  };
+
+  const applyCleaning = async (suggestion: CleaningSuggestion) => {
+    if (!selectedId || cleaning) return;
+    setCleaning(true);
+    try {
+      toast.info(`Applying: ${suggestion.label}`);
+      const body = {
+        operations: [{
+          op: suggestion.op,
+          columns: suggestion.columns ?? undefined,
+          params: suggestion.params ?? {},
+        }],
+        save_as_new: true,
+      };
+      const resp = await apiFetch<{ dataset_id: string; task_id: string }>(
+        `/cleaning/${selectedId}/apply`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+      const result = await pollTask<{ success: boolean; error?: string }>(resp.task_id);
+      if (result && !result.success) throw new Error(result.error || "Cleaning failed");
+      toast.success("Cleaned dataset created");
+      setSelectedId(resp.dataset_id);
+      await fetchDatasets();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Cleaning failed");
+    } finally {
+      setCleaning(false);
+    }
+  };
+
+  const removeDataset = async (id: string) => {
+    try {
+      await apiFetch(`/datasets/${id}`, { method: "DELETE" });
+      toast.success("Dataset removed");
+      if (selectedId === id) setSelectedId(null);
+      await fetchDatasets();
+    } catch {
+      toast.error("Failed to remove dataset");
+    }
+  };
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setDrag(false);
-    const file = e.dataTransfer.files[0];
-    if (file) onUpload(file);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void onUpload(file);
   }, [onUpload]);
 
-  const deleteDataset = async (id: string) => {
-    if (!confirm("Delete this dataset?")) return;
-    try {
-      await apiFetch(`/datasets/${id}`, { method: "DELETE" });
-      setDatasets(datasets.filter(d => d.id !== id));
-      if (selectedId === id) {
-        setSelectedId(null);
-        setSchema(null);
-      }
-      toast.success("Dataset deleted");
-    } catch (err) {
-      toast.error("Delete failed");
-    }
-  };
-
   return (
-    <AppShell title="Data Sources" subtitle="Upload, preview and validate your datasets" status={loading ? "processing" : "ready"}>
-      <div className="max-w-5xl mx-auto px-6 lg:px-10 py-8 space-y-8">
-        
-        {/* Upload Area */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <AppShell title="Data Sources" subtitle="Ingest, inspect and clean datasets" status={loading ? "processing" : "ready"}>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-10 py-8 space-y-8" data-testid="data-sources-root">
+        <header className="animate-fade-in-up">
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">Data Sources</h1>
+          <p className="mt-2 text-sm text-muted-foreground max-w-2xl">
+            Drop a CSV / XLSX / Parquet / JSON, or spin up a synthetic dataset from the demo catalogue.
+            Every dataset is profiled on arrival and surfaced with one-click cleaning suggestions.
+          </p>
+        </header>
+
+        {/* Upload + demo row */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div
+            onDrop={onDrop}
             onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
             onDragLeave={() => setDrag(false)}
-            onDrop={onDrop}
             className={cn(
-              "md:col-span-2 rounded-xl border-2 border-dashed p-10 text-center transition-all cursor-pointer animate-fade-in",
-              drag ? "border-accent bg-accent/5" : "border-border hover:border-accent/40 hover:bg-surface/50"
+              "card-soft p-8 flex flex-col items-center justify-center text-center border-dashed transition-colors",
+              drag ? "border-accent bg-accent/5" : "border-border"
             )}
-            onClick={() => document.getElementById("file-input")?.click()}
+            data-testid="upload-area"
           >
-            <input 
-              id="file-input" 
-              type="file" 
-              className="hidden" 
-              accept={ACCEPTED_TYPES}
-              aria-label="Upload dataset file"
-              onChange={(e) => { e.target.files?.[0] && onUpload(e.target.files[0]); e.target.value = ""; }}
-            />
-            <div className="mx-auto h-11 w-11 rounded-full bg-card border border-border flex items-center justify-center mb-4">
-              <Upload className="h-5 w-5 text-accent" />
+            <div className="h-11 w-11 rounded-full bg-accent-soft text-accent flex items-center justify-center mb-4">
+              <Upload className="h-5 w-5" />
             </div>
-            <h3 className="text-base font-semibold text-foreground">{uploading ? "Uploading…" : "Click or drop a file to begin"}</h3>
-            <p className="mt-1.5 text-sm text-muted-foreground">CSV, JSON, Parquet, Excel · up to {MAX_FILE_SIZE_MB} MB</p>
-            {uploading && uploadProgress > 0 && (
+            <h3 className="text-base font-semibold text-foreground">Drop a file</h3>
+            <p className="mt-1.5 text-sm text-muted-foreground mb-6">
+              CSV, JSON, Parquet or Excel · up to {MAX_FILE_SIZE_MB} MB
+            </p>
+            <label className="inline-flex items-center gap-2 h-10 px-5 rounded-xl bg-accent text-accent-foreground text-sm font-semibold cursor-pointer hover:bg-accent/90 transition-colors shadow-sm">
+              <FileText className="h-4 w-4" /> Choose file
+              <input type="file" accept={ACCEPTED_TYPES} className="hidden" data-testid="file-input"
+                onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
+              />
+            </label>
+            {uploading && (
               <div className="mt-3 w-full max-w-xs mx-auto">
                 <div className="h-2 bg-surface rounded-full overflow-hidden border border-border">
-                  <div
-                    className="h-full bg-accent rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
+                  <div className="h-full bg-accent rounded-full transition-all duration-300 ease-out" style={{ width: `${uploadProgress}%` }} />
                 </div>
                 <p className="text-[11px] text-muted-foreground mt-1 tabular-nums font-mono">{uploadProgress}%</p>
               </div>
             )}
           </div>
 
-          <div className="card-soft p-8 flex flex-col items-center justify-center text-center bg-accent/5 border-accent/20">
-            <div className="h-11 w-11 rounded-full bg-accent-soft text-accent flex items-center justify-center mb-4">
-              <Sparkles className="h-5 w-5" />
+          <div className="card-soft p-5 col-span-1 lg:col-span-2">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="h-8 w-8 rounded-md bg-accent-soft text-accent flex items-center justify-center">
+                <Sparkles className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-foreground">Demo catalogue</h3>
+                <p className="text-xs text-muted-foreground">Generate realistic synthetic data in one click.</p>
+              </div>
             </div>
-            <h3 className="text-base font-semibold text-foreground">Quick Demo</h3>
-            <p className="mt-1.5 text-sm text-muted-foreground mb-6">Load sample sales data in one click</p>
-            <button 
-              disabled={demoLoading}
-              onClick={async () => {
-                if (demoLoading) return;
-                setDemoLoading(true);
-                try {
-                  toast.info("Initializing demo ingestion...");
-                  const resp = await apiFetch<{ dataset_id: string, task_id: string }>("/datasets/seed-demo", { method: "POST" });
-                  
-                  setDatasets(prev => [{
-                    id: resp.dataset_id,
-                    filename: "Sales Performance (Demo)",
-                    created_at: new Date().toISOString(),
-                    status: "processing"
-                  } as any, ...prev]);
-
-                  if (resp.task_id) {
-                    toast.info("Demo ingestion running…");
-                    const result = await pollTask<{ success: boolean; error?: string }>(resp.task_id);
-                    if (result && !result.success) {
-                      throw new Error(result.error || "Demo ingestion failed");
-                    }
-                    toast.success("Demo dataset ready!");
-                    fetchDatasets();
-                  }
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Demo seeding failed");
-                  fetchDatasets();
-                } finally {
-                  setDemoLoading(false);
-                }
-              }}
-              className="w-full h-10 rounded-xl bg-accent text-accent-foreground font-semibold hover:bg-accent/90 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {demoLoading ? "Generating…" : "Generate Demo"}
-            </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {(catalogue.length ? catalogue : []).map((d) => (
+                <button key={d.kind}
+                  disabled={!!busyKind}
+                  onClick={() => seedDemo(d.kind)}
+                  data-testid={`demo-${d.kind}`}
+                  className={cn(
+                    "text-left rounded-lg border border-border bg-card px-3 py-2.5 transition-colors",
+                    busyKind === d.kind ? "ring-2 ring-accent" : "hover:border-accent/50 hover:bg-accent/5",
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-foreground capitalize">{d.label}</span>
+                    {busyKind === d.kind && <span className="text-[10px] text-accent">loading…</span>}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">{d.description}</p>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
-        {selectedId && (
-          <div className="flex items-center justify-between gap-3 animate-fade-in">
-            <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">Actions</h2>
-            <div className="flex items-center gap-3">
-              <button 
-                onClick={() => window.open(`${API_BASE}/export/${selectedId}/csv`)}
-                className="px-4 py-2 rounded-xl bg-surface border border-border hover:bg-muted transition-colors flex items-center gap-2 text-sm font-medium"
-                data-testid="export-csv-btn"
-              >
-                <Database className="w-4 h-4" />
-                Export CSV
-              </button>
-              <button 
-                onClick={() => window.open(`${API_BASE}/export/${selectedId}/excel`)}
-                className="px-4 py-2 rounded-xl bg-surface border border-border hover:bg-muted transition-colors flex items-center gap-2 text-sm font-medium"
-                data-testid="export-excel-btn"
-              >
-                <Files className="w-4 h-4" />
-                Excel
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Datasets list */}
         {datasets.length > 0 && (
-          <section>
-            <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold mb-3">Your Datasets</h2>
-            <div className="space-y-2">
-              {datasets.filter(d => d.id || (d as any).dataset_id).map((d) => (
-                <div 
-                  key={d.id || (d as any).dataset_id} 
-                  className={cn(
-                    "group card-soft p-4 flex items-center justify-between transition-all cursor-pointer",
-                    selectedId === d.id ? "border-accent ring-1 ring-accent/20" : "hover:border-accent/30"
-                  )}
+          <section className="space-y-3">
+            <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">Datasets</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3" data-testid="dataset-list">
+              {datasets.map((d) => (
+                <button key={d.id}
                   onClick={() => setSelectedId(d.id)}
+                  data-testid={`dataset-${d.id.slice(0,8)}`}
+                  className={cn(
+                    "text-left p-4 rounded-xl border bg-card transition-colors",
+                    selectedId === d.id ? "border-accent ring-1 ring-accent/40" : "border-border hover:border-accent/50"
+                  )}
                 >
-                  <div className="flex items-center gap-4 min-w-0">
-                    <div className="h-9 w-9 rounded-md bg-surface border border-border flex items-center justify-center shrink-0">
-                      <FileText className="h-4 w-4 text-muted-foreground" />
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                      <span className="text-sm font-medium truncate">{d.name || d.filename || d.id}</span>
                     </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">{d.name || d.filename || d.id}</p>
-                      <p className="text-[11px] text-muted-foreground mt-0.5">
-                        {d.status === "processing" ? (
-                          <span className="text-accent animate-pulse font-medium">Analyzing data...</span>
-                        ) : (
-                          <>{d.row_count?.toLocaleString() || 0} rows · {d.col_count || 0} columns</>
-                        )}
-                      </p>
-                    </div>
+                    <button onClick={(e) => { e.stopPropagation(); void removeDataset(d.id); }}
+                      className="text-muted-foreground hover:text-destructive transition-colors"
+                      aria-label="Delete"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); deleteDataset(d.id); }}
-                    aria-label="Delete dataset"
-                    className="h-10 w-10 rounded-md hover:bg-destructive/10 flex items-center justify-center text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
+                  <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground tabular-nums">
+                    <span>{(d.row_count ?? 0).toLocaleString()} rows</span>
+                    <span>·</span>
+                    <span>{d.col_count ?? 0} cols</span>
+                  </div>
+                </button>
               ))}
             </div>
           </section>
         )}
 
-        {/* Dataset Statistics */}
-        {schema && (
-          <section className="animate-fade-in-up mb-8">
-            <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold mb-3">Statistics</h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <MetricTile label="Total Rows" value={schema.row_count || 0} icon={Database} delay={0} />
-              <MetricTile label="Columns" value={schema.col_count || 0} icon={Files} delay={100} />
-              <MetricTile label="Size" value={parseFloat(((schema.size_bytes ?? 0) / 1024 / 1024).toFixed(2))} suffix="MB" icon={FileText} delay={200} />
-              <MetricTile label="Status" value={100} suffix="%" icon={CheckCircle2} delay={300} status="good" />
+        {/* Stats panel */}
+        {stats && (
+          <section className="space-y-3 animate-fade-in-up">
+            <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">
+              Profile — {stats.name}
+            </h2>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              <MetricTile label="Rows" value={stats.row_count} icon={Database} delay={0} />
+              <MetricTile label="Columns" value={stats.col_count} icon={Files} delay={60} />
+              <MetricTile label="Numeric" value={stats.numeric_columns} icon={Activity} delay={120} status="good" />
+              <MetricTile label="Text" value={stats.text_columns} icon={FileText} delay={180} />
+              <MetricTile label="Missing" value={stats.missing_cells} icon={AlertTriangle} delay={240} status={stats.missing_cells > 0 ? "warning" : "good"} />
+              <MetricTile label="Quality" value={stats.quality_score} suffix="%" icon={CheckCircle2} delay={300} status={stats.quality_score >= 90 ? "good" : "warning"} />
+            </div>
+            {stats.numeric_summary.length > 0 && (
+              <div className="card-soft p-5">
+                <h3 className="text-sm font-semibold mb-3">Numeric highlights</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {stats.numeric_summary.map((col) => (
+                    <div key={col.column} className="rounded-lg bg-surface p-3 border border-border">
+                      <p className="text-xs font-medium text-foreground truncate">{col.column}</p>
+                      <p className="text-lg font-semibold tabular-nums">{col.mean.toLocaleString()}</p>
+                      <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground font-mono">
+                        <span>min {col.min.toLocaleString()}</span>
+                        <span>·</span>
+                        <span>max {col.max.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Cleaning suggestions */}
+        {suggestions.length > 0 && selectedId && (
+          <section className="space-y-3 animate-fade-in-up">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">One-click cleaning</h2>
+              <span className="text-[11px] text-muted-foreground">Creates a derived dataset — original preserved</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {suggestions.map((s, i) => (
+                <button
+                  key={`${s.op}-${i}`}
+                  disabled={cleaning}
+                  onClick={() => applyCleaning(s)}
+                  data-testid={`cleaning-${s.op}`}
+                  className="inline-flex items-center gap-2 h-8 px-3 rounded-full bg-card border border-border text-[12px] font-medium hover:border-accent hover:bg-accent/5 transition-colors disabled:opacity-50"
+                >
+                  <Wand2 className="h-3 w-3" />
+                  {s.label}
+                </button>
+              ))}
             </div>
           </section>
         )}
 
-        {/* Schema preview */}
-        {schema && schema.columns && (
-          <section className="card-soft animate-fade-in-up">
-            <header className="px-5 py-4 border-b border-border">
-              <h3 className="text-sm font-semibold text-foreground">Column Schema</h3>
-            </header>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground border-b border-border bg-surface/30">
-                    <th className="px-5 py-2.5 font-medium">Column</th>
-                    <th className="px-5 py-2.5 font-medium">Inferred Type</th>
-                    <th className="px-5 py-2.5 font-medium">Cleanliness</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {schema.columns.map((col: any, idx: number) => (
-                    <tr key={col.name} className="border-b border-border last:border-0 hover:bg-surface/20 transition-colors">
-                      <td className="px-5 py-3 font-mono text-xs text-foreground font-semibold truncate max-w-[200px]" title={col.name}>{col.name}</td>
-                      <td className="px-5 py-3">
-                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-mono bg-surface border border-border text-muted-foreground uppercase">
-                          {col.inferred_type}
-                        </span>
-                      </td>
-                      <td className="px-5 py-3">
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 h-1.5 w-20 bg-surface rounded-full overflow-hidden">
-                            <div className="h-full bg-success" style={{ width: `${Math.max(0, 100 - (col.null_pct ?? 0))}%` }} />
-                          </div>
-                          <span className="text-[11px] font-mono">{Math.max(0, 100 - (col.null_pct ?? 0)).toFixed(0)}%</span>
-                        </div>
-                      </td>
+        {/* Schema / exports */}
+        {selectedId && schema && (
+          <section className="space-y-3 animate-fade-in-up" data-testid="schema-panel">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">Schema & exports</h2>
+              <div className="flex items-center gap-3">
+                <button onClick={() => window.open(`${API_BASE}/export/${selectedId}/csv`)}
+                  className="px-4 py-2 rounded-xl bg-surface border border-border hover:bg-muted transition-colors flex items-center gap-2 text-sm font-medium"
+                  data-testid="export-csv-btn"
+                >
+                  <Database className="w-4 h-4" /> Export CSV
+                </button>
+                <button onClick={() => window.open(`${API_BASE}/export/${selectedId}/excel`)}
+                  className="px-4 py-2 rounded-xl bg-surface border border-border hover:bg-muted transition-colors flex items-center gap-2 text-sm font-medium"
+                  data-testid="export-excel-btn"
+                >
+                  <Files className="w-4 h-4" /> Excel
+                </button>
+              </div>
+            </div>
+            <div className="card-soft overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-surface border-b border-border">
+                    <tr>
+                      <th className="text-left px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Column</th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Type</th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sample</th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Completeness</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {(schema.columns || []).map((col) => (
+                      <tr key={col.name} className="border-b border-border/60 hover:bg-surface/60 transition-colors">
+                        <td className="px-5 py-3 font-medium text-sm">{col.name}</td>
+                        <td className="px-5 py-3">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-accent-soft text-accent text-[11px] font-mono">
+                            {col.inferred_type}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-xs text-muted-foreground font-mono truncate max-w-[200px]">
+                          {col.sample_values?.slice(0, 3).join(", ") || "—"}
+                        </td>
+                        <td className="px-5 py-3">
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-1.5 w-20 bg-surface rounded-full overflow-hidden">
+                              <div className="h-full bg-success" style={{ width: `${Math.max(0, 100 - (col.null_pct ?? 0))}%` }} />
+                            </div>
+                            <span className="text-[11px] font-mono">{Math.max(0, 100 - (col.null_pct ?? 0)).toFixed(0)}%</span>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </section>
         )}

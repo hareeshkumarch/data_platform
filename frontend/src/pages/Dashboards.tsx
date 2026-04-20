@@ -35,10 +35,10 @@ const Dashboards = () => {
         
         // Load Recommendations
         const recs: any = await apiFetch(`/chart/recommend/${targetId}`);
-        console.log("Recommended charts:", recs);
+        /* debug removed */
       }
     } catch (err) {
-      console.error(err);
+      /* silently ignore */
       toast.error("Failed to load dashboard data.");
     } finally {
       setLoading(false);

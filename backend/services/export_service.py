@@ -35,7 +35,7 @@ class ExportService:
 
     @staticmethod
     def insights_to_markdown(insights_data: Dict) -> bytes:
-        lines = [f"# Data Intelligence Report\n"]
+        lines = ["# Data Intelligence Report\n"]
         summary = insights_data.get("executive_summary", "")
         if summary:
             lines.append(f"## Executive Summary\n\n{summary}\n")

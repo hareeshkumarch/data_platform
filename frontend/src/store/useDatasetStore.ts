@@ -40,7 +40,7 @@ export const useDatasetStore = create<DatasetState>((set, get) => ({
       set({ datasets: list, lastFetch: Date.now(), loading: false });
       return list;
     } catch (err) {
-      console.error("Dataset fetch failed:", err);
+      /* silently ignore */
       set({ loading: false });
       return get().datasets;
     }
