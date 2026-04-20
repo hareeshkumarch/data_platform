@@ -94,3 +94,6 @@ frontend/build/
 __pycache__/
 *.pyc
 /tmp/
+
+# Python cache
+**/__pycache__/
