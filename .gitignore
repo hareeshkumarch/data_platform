@@ -97,3 +97,12 @@ __pycache__/
 
 # Python cache
 **/__pycache__/
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
