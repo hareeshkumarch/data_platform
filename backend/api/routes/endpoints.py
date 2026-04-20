@@ -228,7 +228,7 @@ class ReactComponentReq(BaseModel):
 async def health(cache: CacheService = Depends(get_cache)):
     return {
         "status": "ok",
-        "redis": "connected" if await cache.ping() else "disconnected",
+        "cache": "connected" if await cache.ping() else "disconnected",
         "version": settings.APP_VERSION,
     }
 
