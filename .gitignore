@@ -1,0 +1,13 @@
+
+.env
+__pycache__/
+*.pyc
+
+uploads/
+faiss_indexes/
+*.csv
+
+node_modules/
+bun.lockb
+
+*.log
