@@ -360,26 +360,25 @@ async def get_schema(dataset_id: str, cache: CacheService = Depends(get_cache), 
 async def list_datasets(storage: StorageService = Depends(get_storage), cache: CacheService = Depends(get_cache)):
     raw = storage.list_datasets()
     enriched = []
-    seen_ids = set()
+    seen_names: dict[str, dict] = {}
     for d in raw:
         did = d.get("id") or d.get("dataset_id")
-        if not did or did in seen_ids:
-            continue  # Deduplicate entries
-        seen_ids.add(did)
+        if not did:
+            continue
         schema = await cache.get_schema(did) if did else None
-        entry = {**d}
+        entry = {**d, "id": did, "dataset_id": did}
         if schema:
             entry["row_count"] = schema.get("row_count", 0)
             entry["col_count"] = schema.get("col_count", 0)
             entry["name"] = schema.get("name", entry.get("filename", did))
+            entry["_has_schema"] = True
         else:
-            # Fallback: try to get counts from the storage record or re-read file
             record = storage.get_dataset_record(did)
             if record:
                 entry["row_count"] = record.get("row_count", 0)
                 entry["col_count"] = record.get("col_count", 0)
                 entry["name"] = record.get("name", entry.get("filename", did))
-            # Try to rebuild schema from disk if row_count is still 0
+            entry["_has_schema"] = False
             if not entry.get("row_count"):
                 file_path = storage.get_file_path(did)
                 if file_path and file_path.exists():
@@ -394,7 +393,12 @@ async def list_datasets(storage: StorageService = Depends(get_storage), cache: C
                             entry["col_count"] = len(header)
                     except Exception:
                         pass
-        enriched.append(entry)
+        # Dedup by (name, row_count, col_count) — prefer entries with live schema
+        key = f"{entry.get('name')}::{entry.get('row_count',0)}::{entry.get('col_count',0)}"
+        existing = seen_names.get(key)
+        if not existing or (entry.get("_has_schema") and not existing.get("_has_schema")):
+            seen_names[key] = entry
+    enriched = [{k: v for k, v in e.items() if k != "_has_schema"} for e in seen_names.values()]
     return {"datasets": enriched}
 
 @router.delete("/datasets/{dataset_id}")

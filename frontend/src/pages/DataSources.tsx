@@ -325,7 +325,7 @@ const DataSources = () => {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <MetricTile label="Total Rows" value={schema.row_count || 0} icon={Database} delay={0} />
               <MetricTile label="Columns" value={schema.col_count || 0} icon={Files} delay={100} />
-              <MetricTile label="Size" value={parseFloat((schema.size_bytes / 1024 / 1024).toFixed(2))} suffix="MB" icon={FileText} delay={200} />
+              <MetricTile label="Size" value={parseFloat(((schema.size_bytes ?? 0) / 1024 / 1024).toFixed(2))} suffix="MB" icon={FileText} delay={200} />
               <MetricTile label="Status" value={100} suffix="%" icon={CheckCircle2} delay={300} status="good" />
             </div>
           </section>

@@ -80,3 +80,17 @@ memory/test_credentials.md
 
 # Mobile development
 android-sdk/
+# Env files
+.env
+.env.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# Build
+frontend/dist/
+frontend/build/
+.pytest_cache/
+__pycache__/
+*.pyc
+/tmp/

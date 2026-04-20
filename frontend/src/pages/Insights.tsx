@@ -30,37 +30,49 @@ const Insights = () => {
         ? activeDatasetId 
         : (dbResp.datasets?.[0]?.id);
 
-      if (targetId) {
-        const preview: DatasetPreview = await apiFetch(`/datasets/${targetId}/preview`);
-        setMainDataset(preview);
-        
-        const analyticsRec = await apiFetch<any>(`/analytics/${targetId}`, {
-          method: "POST",
-          body: JSON.stringify({ 
-            analysis_type: "profile",
-            config: {} 
-          })
-        });
-
-        // Backend returns `profile` array, not `columns` (#2)
-        const profileCols = analyticsRec.profile || analyticsRec.columns || [];
-        const rowCount = analyticsRec.row_count || preview.row_count || 1;
-        
-        const realFindings: Finding[] = profileCols.slice(0, 4).map((col: any) => ({
-          tag: col.inferred_type || "Column",
-          title: `Analysis of ${col.name}`,
-          explanation: `Inferred as ${col.inferred_type}. Found ${col.unique_count ?? 0} unique values.`,
-          confidence: 0.9,
-          metrics: [
-            { label: "Missing Rows", value: `${col.null_count ?? col.missing_count ?? 0}` },
-            { label: "Unique Ratio", value: rowCount > 0 ? `${(((col.unique_count ?? 0) / rowCount) * 100).toFixed(1)}%` : "N/A" }
-          ]
-        }));
-        setFindings(realFindings);
+      if (!targetId) {
+        setFindings([]);
+        setMainDataset(null);
+        return;
       }
-    } catch (err) {
-      console.error(err);
-      toast.error("Failed to load insights. Please try again.");
+
+      // Try to load schema first — if the dataset is stale (no cached schema),
+      // bail silently instead of throwing a user-facing toast.
+      let preview: DatasetPreview | null = null;
+      try {
+        preview = await apiFetch<DatasetPreview>(`/datasets/${targetId}/preview`);
+      } catch {
+        setFindings([]);
+        setMainDataset(null);
+        return;
+      }
+      setMainDataset(preview);
+      
+      const analyticsRec = await apiFetch<{ profile?: Array<Record<string, unknown>>; columns?: Array<Record<string, unknown>>; row_count?: number }>(`/analytics/${targetId}`, {
+        method: "POST",
+        body: JSON.stringify({ 
+          analysis_type: "profile",
+          config: {} 
+        })
+      });
+
+      const profileCols = analyticsRec.profile || analyticsRec.columns || [];
+      const rowCount = analyticsRec.row_count || preview.row_count || 1;
+      
+      const realFindings: Finding[] = profileCols.slice(0, 4).map((col) => ({
+        tag: (col.inferred_type as string) || "Column",
+        title: `Analysis of ${col.name}`,
+        explanation: `Inferred as ${col.inferred_type}. Found ${(col.unique_count as number) ?? 0} unique values.`,
+        confidence: 0.9,
+        metrics: [
+          { label: "Missing Rows", value: `${(col.null_count as number) ?? (col.missing_count as number) ?? 0}` },
+          { label: "Unique Ratio", value: rowCount > 0 ? `${((((col.unique_count as number) ?? 0) / rowCount) * 100).toFixed(1)}%` : "N/A" }
+        ]
+      }));
+      setFindings(realFindings);
+    } catch {
+      // Silent on transient errors; keep the empty state friendly.
+      setFindings([]);
     } finally {
       setLoading(false);
     }
