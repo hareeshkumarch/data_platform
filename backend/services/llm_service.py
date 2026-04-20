@@ -10,13 +10,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import litellm
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.utils import get_app_identifier, get_integration_proxy_url
 
 from backend.config import settings
 from backend.models.schemas import LLMMode, LLMProvider, LLMRequest, LLMResponse
@@ -135,18 +138,59 @@ class LLMService:
         return response
 
     async def stream_complete(self, request: LLMRequest) -> AsyncIterator[str]:
-        """Yield token-sized chunks as the model produces them.
+        """Stream tokens directly from the LLM provider as they arrive.
 
-        The emergentintegrations SDK does not expose a streaming API, so we
-        request the full completion and chunk it word-by-word which the
-        frontend renders smoothly.
+        Uses ``litellm.acompletion(stream=True)`` with the Emergent proxy so we
+        get true token-level streaming for OpenAI/Anthropic/Gemini. Falls back
+        to word-chunking if streaming fails.
         """
-        response = await self.complete(request)
-        text = response.content or ""
-        # Split into tokens roughly the size of a word and stream them.
-        for token in re.findall(r"\S+\s*|\s+", text):
-            yield token
-            await asyncio.sleep(0.012)
+        if not self._api_key:
+            raise RuntimeError("EMERGENT_LLM_KEY not configured.")
+        provider, model = self._resolve(request)
+        app_identifier = get_app_identifier()
+        headers = {"X-App-ID": app_identifier} if app_identifier else {}
+
+        params: Dict[str, Any] = {
+            "model": model if provider != "gemini" else f"gemini/{model}",
+            "messages": [
+                {"role": "system", "content": request.system_prompt or "You are Lumen, a helpful data intelligence assistant."},
+                {"role": "user", "content": request.prompt},
+            ],
+            "api_key": self._api_key,
+            "api_base": get_integration_proxy_url() + "/llm",
+            "custom_llm_provider": "openai",
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": True,
+            "extra_headers": headers,
+        }
+
+        start = time.perf_counter()
+        full_text = ""
+        try:
+            stream = await litellm.acompletion(**params)
+            async for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta
+                    piece = (delta.content if hasattr(delta, "content") else None) or ""
+                except Exception:
+                    piece = ""
+                if piece:
+                    full_text += piece
+                    yield piece
+            latency_ms = (time.perf_counter() - start) * 1000
+            tokens = _estimate_tokens(request.prompt) + _estimate_tokens(full_text)
+            self._stats.observe(tokens, latency_ms)
+            metrics.llm_calls.labels(provider=provider, model=model, status="success").inc()
+            metrics.llm_tokens.labels(provider=provider, model=model).inc(tokens)
+            metrics.llm_latency.labels(provider=provider).observe(latency_ms / 1000)
+        except Exception as exc:
+            logger.warning("litellm stream failed — falling back to chunked completion", error=str(exc))
+            response = await self.complete(request)
+            text = response.content[len(full_text):] or response.content
+            for token in re.findall(r"\S+\s*|\s+", text):
+                yield token
+                await asyncio.sleep(0.012)
 
     async def parallel_complete(self, requests: List[LLMRequest]) -> List[LLMResponse]:
         return await asyncio.gather(*[self.complete(r) for r in requests])

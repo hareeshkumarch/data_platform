@@ -12,6 +12,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.api.middleware.rate_limit import rate_limit_middleware
+from backend.api.routes.conversations import conversations_router
 from backend.api.routes.endpoints import router
 from backend.api.routes.warehouse import warehouse_router
 from backend.api.routes.websocket import register_websockets
@@ -50,6 +52,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.middleware("http")(rate_limit_middleware)
+
 
 @app.middleware("http")
 async def timing(request: Request, call_next):
@@ -75,6 +79,7 @@ async def global_error(request: Request, exc: Exception):
 
 app.include_router(router, prefix=settings.API_PREFIX)
 app.include_router(warehouse_router, prefix=settings.API_PREFIX)
+app.include_router(conversations_router, prefix=settings.API_PREFIX)
 register_websockets(app)
 
 

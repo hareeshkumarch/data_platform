@@ -20,5 +20,7 @@ prometheus-client==0.21.1
 structlog==24.4.0
 python-dotenv==1.0.1
 
-# LLM (installed separately from Emergent's package index)
-# emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
+# LLM
+litellm>=1.57.0,<2
+# emergentintegrations installed separately from Emergent's package index
+# pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/

@@ -32,6 +32,7 @@ const Query = () => {
   const {
     conversations, activeId, mode,
     setMode, newConversation, appendMessage, updateLastMessage, renameFromFirstMessage,
+    hydrateFromServer,
   } = useQueryStore();
   const activeDatasetId = useAppStore((s) => s.dataset);
 
@@ -45,6 +46,11 @@ const Query = () => {
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // Hydrate server-side conversations once on mount
+  useEffect(() => {
+    void hydrateFromServer();
+  }, [hydrateFromServer]);
 
   // Auto-scroll
   useEffect(() => {
