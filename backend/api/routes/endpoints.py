@@ -1,6 +1,8 @@
 from __future__ import annotations
 import base64
+import io
 import json
+import os
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -849,6 +851,8 @@ async def llm_metrics(llm: LLMService = Depends(get_llm)):
         key_source = "anthropic"
     elif _s.GEMINI_API_KEY:
         key_source = "gemini"
+    elif _s.GROQ_API_KEY:
+        key_source = "groq"
     else:
         key_source = "none"
     return {
@@ -869,6 +873,8 @@ async def list_provider_status(llm: LLMService = Depends(get_llm)):
     from backend.config import settings as _s
     key = _s.EMERGENT_LLM_KEY or ""
     masked = (key[:6] + "••••" + key[-4:]) if key else ""
+    groq_key = _s.GROQ_API_KEY or ""
+    groq_masked = (groq_key[:4] + "••••" + groq_key[-4:]) if groq_key else ""
     return {
         "providers": llm.get_providers(),
         "models": llm.get_models(),
@@ -876,6 +882,8 @@ async def list_provider_status(llm: LLMService = Depends(get_llm)):
         "default_model": _s.DEFAULT_LLM_MODEL,
         "key_masked": masked,
         "key_configured": bool(key),
+        "groq_key_masked": groq_masked,
+        "groq_key_configured": bool(groq_key),
     }
 
 
@@ -890,7 +898,7 @@ class SettingsBody(BaseModel):
 async def update_settings(body: SettingsBody):
     """Update in-memory defaults. Clients persist locally; backend honors on next call."""
     from backend.config import settings as _s
-    if body.provider and body.provider in ("openai", "anthropic", "gemini"):
+    if body.provider and body.provider in ("openai", "anthropic", "gemini", "groq"):
         _s.DEFAULT_LLM_PROVIDER = body.provider
     if body.model:
         _s.DEFAULT_LLM_MODEL = body.model

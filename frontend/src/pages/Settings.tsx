@@ -25,7 +25,7 @@ interface LlmMetrics {
   avg_latency_ms: number;
   errors_24h: number;
   success_rate: number;
-  key_source: "emergent" | "openai" | "anthropic" | "gemini" | "none";
+  key_source: "emergent" | "openai" | "anthropic" | "gemini" | "groq" | "none";
   active_provider: string;
   active_model: string;
 }
@@ -349,7 +349,7 @@ const ToggleRow = ({
 const ProviderCreditsBadge = ({
   keySource, keyMasked, activeProvider, activeModel, calls, tokens, successRate, avgLatencyMs,
 }: {
-  keySource: "emergent" | "openai" | "anthropic" | "gemini" | "none";
+  keySource: "emergent" | "openai" | "anthropic" | "gemini" | "groq" | "none";
   keyMasked?: string;
   activeProvider: string;
   activeModel: string;
@@ -379,9 +379,14 @@ const ProviderCreditsBadge = ({
       hint: "Using your GEMINI_API_KEY — billed against your Google AI account.",
       tone: "success",
     },
+    groq: {
+      label: "Direct · Groq",
+      hint: "Using your GROQ_API_KEY — free-tier + paid tiers at console.groq.com.",
+      tone: "success",
+    },
     none: {
       label: "No key configured",
-      hint: "Set EMERGENT_LLM_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY) in backend/.env.",
+      hint: "Set EMERGENT_LLM_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY / GROQ_API_KEY) in backend/.env.",
       tone: "destructive",
     },
   };

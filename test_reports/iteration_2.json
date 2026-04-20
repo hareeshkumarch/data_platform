@@ -1,0 +1,43 @@
+{
+  "summary": "End-to-end retest focused on Groq provider support and full pipeline. Backend: 27/27 pytest cases PASS (14 existing test_lumen_e2e.py + 13 new test_groq_and_e2e_extra.py). Validated: /api/health + /api/v1/health both 200, /api/v1/models exposes groq with all 5 expected models (llama-3.3-70b-versatile, llama-3.1-8b-instant, llama3-70b-8192, mixtral-8x7b-32768, gemma2-9b-it), /api/v1/settings/providers includes groq_key_masked + groq_key_configured=false, /api/v1/metrics/llm key_source='emergent', POST /api/v1/settings accepts {provider:'groq', model:'llama-3.3-70b-versatile'} (whitelist OK), POST /api/v1/chat with provider=groq without GROQ_API_KEY returns clear 500 mentioning GROQ_API_KEY (expected graceful error), seed-demo → task poll → dataset preview, process-data + /eda/{id}, generate-insights task → /insights/{id} returns >=1 insight (LLM-backed), /chart/generate returns {chart_type, data}, POST+GET /dashboard/{id} returns charts/kpis arrays, POST /query/{id} with NL question completes, /analytics kpis + profile both 200, /chat real reply + /chat-stream SSE [DONE], and WS /api/v1/ws/pipeline emits stage frames + final complete frame with reply. Frontend: All 5 pages (Insights, /data, Query, Dashboards, Reports, Settings) render with zero page errors (only React Router v7 future-flag warnings, harmless). Settings page: clicking groq provider button populates model dropdown with all 5 groq models, Save POSTs /api/v1/settings → 200 and shows success toast.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/v1/datasets", "issue": "Listing still returns duplicate entries for repeated seed-demo calls (carried over from iteration 1)."},
+      {"endpoint": "/api/v1/health", "issue": "Response contains 'redis: connected' even though the problem statement explicitly says no Redis is used (CacheService is in-memory). Misleading field — consider removing or renaming to reflect actual cache backend."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Settings", "issues": ["Success toast at bottom-right overlaps/obscures the 'Save changes' button on 1920px viewport (confirmed again in this iteration)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lumen_e2e.py",
+    "/app/backend/tests/test_groq_and_e2e_extra.py",
+    "/app/test_reports/pytest/lumen_e2e.xml",
+    "/app/test_reports/pytest/groq_e2e.xml"
+  ],
+  "action_items": [
+    "(Optional) /api/v1/health should not report 'redis: connected' when Redis is not in use — the CacheService is in-memory per problem statement.",
+    "(Optional, carried over from iter 1) Dedup /api/v1/datasets listing so repeated seed-demo doesn't grow the registry.",
+    "(Cosmetic) Move 'Settings saved' toast origin away from the Save button on the Settings page so it doesn't overlap on desktop widths."
+  ],
+  "critical_code_review_comments": [
+    "Groq integration is correctly wired: ALL_MODELS exposes 5 groq ids; settings whitelist accepts groq; /chat bypasses Emergent for provider=groq and raises a descriptive error when GROQ_API_KEY is empty. Behaviour matches spec.",
+    "/api/v1/metrics/llm returns key_source='emergent' correctly when EMERGENT_LLM_KEY is set; switching to groq (if key present) would swap to 'groq' via existing branch.",
+    "endpoints.py at 891 lines should be split by resource (carried over).",
+    "Frontend Settings.tsx groq badge label + key_source type extension both present and functional end-to-end."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_groq_and_e2e_extra.py (new, 13 tests)"
+  ],
+  "success_rate": {"backend": "100% (27/27)", "frontend": "100% (all pages render, groq provider switch + save works)"},
+  "test_credentials": "No auth required — single-user deployment (see /app/memory/test_credentials.md).",
+  "seed_data_creation": "Seed dataset (Postgres sales_performance, 260 rows × 8 cols) created via POST /api/v1/datasets/seed-demo during tests. Multiple duplicates exist from repeated seeding across iterations.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Full suite now lives at /app/backend/tests/ (test_lumen_e2e.py + test_groq_and_e2e_extra.py). Use REACT_APP_BACKEND_URL env var. Backend URL: https://05f8eb65-1b3d-4d96-b4af-4757f693443f.preview.emergentagent.com. Sidebar route for Data Sources is /data (NOT /data-sources). Groq provider works end-to-end in backend + frontend; it intentionally errors in /chat with a clear GROQ_API_KEY message because the key is empty — this is correct behaviour, not a bug. WS pipeline available at wss://<origin>/api/v1/ws/pipeline."
+}

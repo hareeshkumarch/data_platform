@@ -47,6 +47,13 @@ ALL_MODELS: Dict[str, List[Dict[str, Any]]] = {
         {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro", "mode": "advanced"},
         {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "mode": "fast"},
     ],
+    "groq": [
+        {"id": "llama-3.3-70b-versatile", "label": "Llama 3.3 70B Versatile", "mode": "advanced"},
+        {"id": "llama-3.1-8b-instant", "label": "Llama 3.1 8B Instant", "mode": "fast"},
+        {"id": "llama3-70b-8192", "label": "Llama 3 70B", "mode": "balanced"},
+        {"id": "mixtral-8x7b-32768", "label": "Mixtral 8x7B", "mode": "balanced"},
+        {"id": "gemma2-9b-it", "label": "Gemma 2 9B", "mode": "fast"},
+    ],
 }
 
 
@@ -54,6 +61,7 @@ DEFAULT_MODEL_BY_PROVIDER: Dict[str, str] = {
     "openai": "gpt-5.2",
     "anthropic": "claude-sonnet-4-5-20250929",
     "gemini": "gemini-2.5-flash",
+    "groq": "llama-3.3-70b-versatile",
 }
 
 
@@ -153,7 +161,9 @@ class LLMService:
         """
         provider, model = self._resolve(request)
         direct_key = self._direct_keys.get(provider)
-        if not self._api_key and not direct_key:
+        # Groq is NOT covered by EMERGENT_LLM_KEY — force direct-key path.
+        use_emergent = bool(self._api_key) and provider != "groq"
+        if not use_emergent and not direct_key:
             raise RuntimeError("No LLM key configured for provider: " + provider)
 
         params: Dict[str, Any] = {
@@ -166,7 +176,7 @@ class LLMService:
             "stream": True,
         }
 
-        if self._api_key:
+        if use_emergent:
             app_identifier = get_app_identifier()
             headers = {"X-App-ID": app_identifier} if app_identifier else {}
             params.update({
@@ -240,7 +250,9 @@ class LLMService:
 
     async def _call(self, request: LLMRequest, provider: str, model: str) -> str:
         direct_key = self._direct_keys.get(provider)
-        if self._api_key:
+        # Emergent universal key does not cover Groq — always use direct path.
+        use_emergent = bool(self._api_key) and provider != "groq"
+        if use_emergent:
             chat = LlmChat(
                 api_key=self._api_key,
                 session_id=f"lumen-{uuid.uuid4().hex[:12]}",
@@ -262,6 +274,8 @@ class LLMService:
             }
             resp = await litellm.acompletion(**params)
             return resp.choices[0].message.content or ""
+        if provider == "groq":
+            raise RuntimeError("Groq requires GROQ_API_KEY in backend/.env — get one at https://console.groq.com/keys.")
         raise RuntimeError("No LLM key configured (EMERGENT_LLM_KEY or provider API key).")
 
     @staticmethod

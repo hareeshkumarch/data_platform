@@ -19,10 +19,13 @@ class Settings(BaseSettings):
 
     # LLM (Emergent universal key covers OpenAI, Anthropic and Gemini)
     EMERGENT_LLM_KEY: Optional[str] = None
-    # Direct-provider keys — used as fallback when EMERGENT_LLM_KEY is missing
+    # Direct-provider keys — used as fallback when EMERGENT_LLM_KEY is missing.
+    # Groq is NOT covered by EMERGENT_LLM_KEY, so GROQ_API_KEY is required
+    # whenever the Groq provider is selected.
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
     DEFAULT_LLM_PROVIDER: str = "openai"
     DEFAULT_LLM_MODEL: str = "gpt-5.2"
     LLM_PARALLEL_CALLS: int = 4
