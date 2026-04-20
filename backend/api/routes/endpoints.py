@@ -290,8 +290,23 @@ async def upload_data(
 @router.post("/datasets/seed-demo")
 async def seed_demo_dataset(
     storage: StorageService = Depends(get_storage),
+    cache: CacheService = Depends(get_cache),
 ):
     from backend.services.sql_service import ensure_sample_csv_on_disk
+    # Reuse an already-seeded demo dataset if its schema is cached (idempotent).
+    for existing in storage.list_datasets():
+        did = existing.get("id") or existing.get("dataset_id")
+        fname = existing.get("filename") or ""
+        if did and fname in ("Sales Performance (Sample)", "sales_performance.csv"):
+            if await cache.get_schema(did):
+                return {
+                    "dataset_id": did,
+                    "filename": "Sales Performance (Sample)",
+                    "task_id": None,
+                    "status": "success",
+                    "message": "Demo dataset already seeded — reusing existing registry entry.",
+                }
+
     try:
         source_path = ensure_sample_csv_on_disk()
         with open(source_path, "rb") as f:
