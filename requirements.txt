@@ -1,0 +1,24 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.7.0
+python-multipart==0.0.20
+
+httpx==0.28.1
+
+pandas==2.2.3
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.6.0
+pyarrow==18.1.0
+openpyxl==3.1.5
+
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+
+prometheus-client==0.21.1
+structlog==24.4.0
+python-dotenv==1.0.1
+
+# LLM (installed separately from Emergent's package index)
+# emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/

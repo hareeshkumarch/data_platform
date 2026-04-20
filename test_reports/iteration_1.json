@@ -1,0 +1,49 @@
+{
+  "summary": "End-to-end testing of Lumen data platform. Backend: 14/14 pytest cases PASS including health, providers, real LLM chat via emergentintegrations, SSE streaming (GET /chat-stream), seed-demo task flow, dataset preview/list, Postgres warehouse (tables + SELECT query), analytics profile, chart generate, settings persistence (openai<->anthropic), system stats, LLM metrics, and generate-insights task completion. Frontend: Fixed missing /app/frontend/.env + vite.config.ts env-loading bug (frontend was calling http://localhost:8001 from the public origin). After fix, Insights/Data/Query/Dashboards/Reports/Settings all render with zero console errors. Verified: Generate Demo seeds dataset (260 rows x 8 cols), chat-mode streams real GPT-5.2 reply, agent-pipeline mode animates all 5 stages (ingestion → understanding → insight → visualization → report) and completes in ~3.5s, settings provider switch persists with success toast, theme toggle flips dark mode class.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/v1/datasets", "issue": "Listing returns duplicate entries for the same seed (multiple UUIDs) and older entries lose cache → /datasets/{old_id}/preview returns 404. Consider deduping on filename/hash or pruning stale records."},
+      {"endpoint": "/api/v1/datasets/{id}/preview", "issue": "Depends on in-memory cache (cache_service). If backend restarts, previously-seeded datasets 404 until re-seeded."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Insights page (/)", "issue": "On load, TopBar auto-selects the first dataset (often a stale one w/o cached schema) and triggers /generate-insights/{id} + /insights/{id} which 404, showing a 'Failed to load insights' toast. Should pick the newest dataset with a valid schema, or fall back silently when none.", "selector": "pages/Insights.tsx loadInsights", "priority": "MEDIUM"},
+      {"component": "Data Sources STATISTICS card", "issue": "Size shows 'NaNMB' when size_bytes is missing.", "selector": "DataSources.tsx size formatter", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Settings", "issues": ["Save button partially overlapped by 'Settings saved' toast at bottom-right on 1920px viewport"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lumen_e2e.py",
+    "/app/test_reports/pytest/lumen_e2e.xml"
+  ],
+  "action_items": [
+    "Review /app/frontend/.env (newly created) and /app/frontend/vite.config.ts (updated to use loadEnv with REACT_APP_/VITE_ prefixes) — main agent should keep this config so preview/prod URLs are picked up correctly.",
+    "Dedup /api/v1/datasets listing and/or purge stale cache entries so the UI does not auto-select a 404 dataset.",
+    "Fix Insights page fallback when selected dataset has no insights yet (avoid user-facing error toast on first visit).",
+    "Fix NaNMB size display on Data Sources when size_bytes unknown."
+  ],
+  "critical_code_review_comments": [
+    "vite.config.ts previously read process.env.REACT_APP_BACKEND_URL which is NOT populated by Vite's dotenv loader — fixed by switching to loadEnv(mode, cwd, ['REACT_APP_','VITE_']).",
+    "/app/frontend/.env was missing entirely; this is listed as a protected variable. Added with both REACT_APP_BACKEND_URL and VITE_BACKEND_URL pointing at the public preview origin.",
+    "Dataset registry does not deduplicate repeat seeds; every click of Generate Demo creates a new UUID even though the content is identical (sales_performance.csv).",
+    "Preview endpoint relies on in-memory cache only — schema should be re-hydrated from disk on lookup to survive restarts.",
+    "endpoints.py is 891 lines — consider splitting by resource (datasets / analytics / chat / charts / settings) for maintainability."
+  ],
+  "updated_files": [
+    "/app/frontend/.env (created)",
+    "/app/frontend/vite.config.ts (switched to loadEnv)",
+    "/app/backend/tests/test_lumen_e2e.py (new pytest suite, 14 tests)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "95%"},
+  "test_credentials": "No auth — single-user deployment. See /app/memory/test_credentials.md.",
+  "seed_data_creation": "Seed dataset created via POST /api/v1/datasets/seed-demo (sales_performance, 260 rows, 8 cols). Multiple duplicate entries exist due to repeated seed calls during testing.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend fully wired; all /api/v1/* smoke endpoints pass. The only non-trivial frontend bug left is the Insights page auto-selecting a stale dataset on first load. Note that /chat-stream is a GET (not POST) with query params; /warehouse/query expects {sql, limit} (not {query}); /analytics/{id} is POST with {analysis_type, config}; /generate-insights/{id} is POST with {focus_columns, llm_provider, llm_model}.",
+  "rca_of_frontend_localhost_issue": "Frontend built via Vite dev server. vite.config.ts resolved BACKEND_URL from process.env.REACT_APP_BACKEND_URL, but Vite's dotenv loader does NOT export unprefixed (non-VITE_) vars into process.env — it only injects them into import.meta.env when loadEnv is called explicitly. Since /app/frontend/.env was also missing, BACKEND_URL fell back to 'http://localhost:8001' and was baked into the bundle via `define`. Browser then fetched http://localhost:8001/api/v1/datasets from the public https origin and Chrome blocked it with 'Permission denied for loopback address space' CORS error. Fixed by (a) creating /app/frontend/.env with REACT_APP_BACKEND_URL + VITE_BACKEND_URL set to the public origin, and (b) updating vite.config.ts to use loadEnv(mode, cwd, ['REACT_APP_','VITE_'])."
+}
