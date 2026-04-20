@@ -838,7 +838,19 @@ async def system_stats(llm: LLMService = Depends(get_llm)):
 @router.get("/metrics/llm")
 async def llm_metrics(llm: LLMService = Depends(get_llm)):
     """Structured LLM metrics for the Settings page."""
+    from backend.config import settings as _s
     stats = llm.get_stats()
+    # Identify which key source is active
+    if _s.EMERGENT_LLM_KEY:
+        key_source = "emergent"
+    elif _s.OPENAI_API_KEY:
+        key_source = "openai"
+    elif _s.ANTHROPIC_API_KEY:
+        key_source = "anthropic"
+    elif _s.GEMINI_API_KEY:
+        key_source = "gemini"
+    else:
+        key_source = "none"
     return {
         "calls_24h": stats["llm_calls"],
         "tokens_in": stats["llm_tokens"] // 2,
@@ -846,6 +858,9 @@ async def llm_metrics(llm: LLMService = Depends(get_llm)):
         "avg_latency_ms": stats["avg_latency_ms"],
         "errors_24h": stats["llm_errors"],
         "success_rate": stats["success_rate"],
+        "key_source": key_source,
+        "active_provider": _s.DEFAULT_LLM_PROVIDER,
+        "active_model": _s.DEFAULT_LLM_MODEL,
     }
 
 

@@ -3,9 +3,9 @@ import { InsightCard } from "@/components/cards/InsightCard";
 import { DynamicChart } from "@/components/charts/DynamicChart";
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-client";
-import { ApiResponse, Dataset, DatasetPreview } from "@/lib/types";
+import { ApiResponse, Dataset, DatasetColumn, DatasetPreview } from "@/lib/types";
 import { useAppStore } from "@/store/useAppStore";
-import { Sparkles, Activity, AlertTriangle, TrendingUp, Grid3x3 } from "lucide-react";
+import { Sparkles, Activity, AlertTriangle, TrendingUp, Grid3x3, LineChart, Radar } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Finding {
@@ -40,7 +40,24 @@ interface Outlier {
   lower_fence: number;
 }
 
-type Tab = "overview" | "correlations" | "trends" | "outliers";
+type Tab = "overview" | "correlations" | "trends" | "outliers" | "forecast" | "anomalies";
+
+interface ForecastResponse {
+  column: string;
+  history: Array<{ date: string; value: number }>;
+  smoothed: Array<{ date: string; value: number }>;
+  forecast: Array<{ date: string; value: number }>;
+  slope: number;
+  intercept: number;
+}
+
+interface AnomalyResponse {
+  column: string;
+  count: number;
+  rate_pct: number;
+  threshold: number;
+  anomalies: Array<{ index: number; value: number; z_score: number }>;
+}
 
 const Insights = () => {
   const [loading, setLoading] = useState(true);
@@ -50,7 +67,19 @@ const Insights = () => {
   const [correlations, setCorrelations] = useState<Correlations | null>(null);
   const [trends, setTrends] = useState<Trend[]>([]);
   const [outliers, setOutliers] = useState<Outlier[]>([]);
+  const [forecast, setForecast] = useState<ForecastResponse | null>(null);
+  const [anomalies, setAnomalies] = useState<AnomalyResponse | null>(null);
+  const [forecastCol, setForecastCol] = useState<string>("");
+  const [anomalyCol, setAnomalyCol] = useState<string>("");
+  const [zThreshold, setZThreshold] = useState<number>(3.0);
+  const [advancedLoading, setAdvancedLoading] = useState(false);
+  const [activeTargetId, setActiveTargetId] = useState<string>("");
   const activeDatasetId = useAppStore((s) => s.dataset);
+
+  const numericColumns = useMemo<string[]>(() => {
+    const cols = (mainDataset?.columns as DatasetColumn[] | undefined) ?? [];
+    return cols.filter((c) => c?.inferred_type === "numeric").map((c) => c.name);
+  }, [mainDataset]);
 
   const loadOverview = async (targetId: string) => {
     try {
@@ -105,6 +134,7 @@ const Insights = () => {
           ? activeDatasetId
           : db.datasets?.[0]?.id;
         if (!targetId) { setLoading(false); return; }
+        setActiveTargetId(targetId);
         await Promise.all([loadOverview(targetId), loadAdvanced(targetId)]);
       } finally {
         setLoading(false);
@@ -112,11 +142,60 @@ const Insights = () => {
     })();
   }, [activeDatasetId]);
 
+  // Preselect the first numeric column for forecast / anomaly once schema loads
+  useEffect(() => {
+    if (numericColumns.length === 0) return;
+    if (!forecastCol || !numericColumns.includes(forecastCol)) setForecastCol(numericColumns[0]);
+    if (!anomalyCol || !numericColumns.includes(anomalyCol)) setAnomalyCol(numericColumns[0]);
+  }, [numericColumns, forecastCol, anomalyCol]);
+
+  const runForecast = async () => {
+    if (!activeTargetId || !forecastCol) return;
+    setAdvancedLoading(true);
+    try {
+      const data = await apiFetch<ForecastResponse>(
+        `/analytics/${activeTargetId}/forecast?column=${encodeURIComponent(forecastCol)}&periods=12`,
+      );
+      setForecast(data);
+    } catch {
+      setForecast(null);
+    } finally {
+      setAdvancedLoading(false);
+    }
+  };
+
+  const runAnomalies = async () => {
+    if (!activeTargetId || !anomalyCol) return;
+    setAdvancedLoading(true);
+    try {
+      const data = await apiFetch<AnomalyResponse>(
+        `/analytics/${activeTargetId}/anomalies?column=${encodeURIComponent(anomalyCol)}&threshold=${zThreshold}`,
+      );
+      setAnomalies(data);
+    } catch {
+      setAnomalies(null);
+    } finally {
+      setAdvancedLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "forecast" && activeTargetId && forecastCol) void runForecast();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, activeTargetId, forecastCol]);
+
+  useEffect(() => {
+    if (tab === "anomalies" && activeTargetId && anomalyCol) void runAnomalies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, activeTargetId, anomalyCol, zThreshold]);
+
   const tabs: { id: Tab; label: string; icon: typeof Activity }[] = [
     { id: "overview", label: "Overview", icon: Activity },
     { id: "correlations", label: "Correlations", icon: Grid3x3 },
     { id: "trends", label: "Trends", icon: TrendingUp },
     { id: "outliers", label: "Outliers", icon: AlertTriangle },
+    { id: "forecast", label: "Forecast", icon: LineChart },
+    { id: "anomalies", label: "Anomalies", icon: Radar },
   ];
 
   return (
@@ -157,6 +236,26 @@ const Insights = () => {
         {tab === "correlations" && <CorrelationsPanel data={correlations} />}
         {tab === "trends" && <TrendsPanel trends={trends} dataset={mainDataset} />}
         {tab === "outliers" && <OutliersPanel outliers={outliers} />}
+        {tab === "forecast" && (
+          <ForecastPanel
+            columns={numericColumns}
+            column={forecastCol}
+            setColumn={setForecastCol}
+            data={forecast}
+            loading={advancedLoading}
+          />
+        )}
+        {tab === "anomalies" && (
+          <AnomalyPanel
+            columns={numericColumns}
+            column={anomalyCol}
+            setColumn={setAnomalyCol}
+            threshold={zThreshold}
+            setThreshold={setZThreshold}
+            data={anomalies}
+            loading={advancedLoading}
+          />
+        )}
 
         <p className="mt-10 text-xs text-muted-foreground text-center">
           <Sparkles className="h-3 w-3 inline mr-1" />
@@ -333,6 +432,201 @@ const EmptyState = ({ icon: Icon, title, subtitle }: { icon: typeof Activity; ti
     <Icon className="h-10 w-10 text-muted-foreground/30 mx-auto mb-4" />
     <p className="text-sm text-muted-foreground uppercase tracking-wider font-semibold">{title}</p>
     <p className="text-xs text-muted-foreground mt-1">{subtitle}</p>
+  </div>
+);
+
+const ForecastPanel = ({
+  columns, column, setColumn, data, loading,
+}: {
+  columns: string[];
+  column: string;
+  setColumn: (c: string) => void;
+  data: ForecastResponse | null;
+  loading: boolean;
+}) => {
+  if (columns.length === 0) {
+    return <EmptyState icon={LineChart} title="No numeric columns" subtitle="Forecasting needs at least one numeric + one date column." />;
+  }
+
+  const chartData = useMemo(() => {
+    if (!data) return [];
+    const history = data.history.map((p) => ({ date: p.date, history: p.value }));
+    const smoothed = data.smoothed.map((p) => ({ date: p.date, smoothed: p.value }));
+    const forecast = data.forecast.map((p) => ({ date: p.date, forecast: p.value }));
+    const merged = new Map<string, Record<string, unknown>>();
+    for (const rows of [history, smoothed, forecast]) {
+      for (const row of rows) {
+        const existing = (merged.get(row.date) ?? { date: row.date }) as Record<string, unknown>;
+        merged.set(row.date, { ...existing, ...row });
+      }
+    }
+    return Array.from(merged.values());
+  }, [data]);
+
+  const slopeLabel = data
+    ? `${data.slope > 0 ? "+" : ""}${data.slope.toFixed(3)} per period`
+    : "";
+
+  return (
+    <div className="space-y-4">
+      <div className="card-soft p-5 space-y-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div>
+            <h3 className="text-sm font-semibold">Linear forecast</h3>
+            <p className="text-[11px] text-muted-foreground">Monthly resample + 12-period linear projection.</p>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <label htmlFor="forecast-column" className="text-[11px] text-muted-foreground">Column</label>
+            <select
+              id="forecast-column"
+              value={column}
+              onChange={(e) => setColumn(e.target.value)}
+              data-testid="forecast-column-select"
+              className="h-8 rounded-md border border-border bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {loading && !data && <SkeletonChart />}
+
+        {data && chartData.length > 0 && (
+          <div className="space-y-3">
+            <DynamicChart spec={{
+              chart: "line",
+              data: chartData,
+              xKey: "date",
+              series: [
+                { key: "history", label: "History" },
+                { key: "smoothed", label: "Rolling mean" },
+                { key: "forecast", label: "Forecast" },
+              ],
+            }} />
+            <div className="flex items-center gap-3 text-[11px] text-muted-foreground font-mono">
+              <span>slope {slopeLabel}</span>
+              <span>·</span>
+              <span>intercept {data.intercept.toFixed(2)}</span>
+              <span>·</span>
+              <span>{data.history.length} history points · {data.forecast.length} future</span>
+            </div>
+          </div>
+        )}
+
+        {!loading && !data && (
+          <p className="text-xs text-muted-foreground">Select a column to compute a forecast.</p>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const AnomalyPanel = ({
+  columns, column, setColumn, threshold, setThreshold, data, loading,
+}: {
+  columns: string[];
+  column: string;
+  setColumn: (c: string) => void;
+  threshold: number;
+  setThreshold: (t: number) => void;
+  data: AnomalyResponse | null;
+  loading: boolean;
+}) => {
+  if (columns.length === 0) {
+    return <EmptyState icon={Radar} title="No numeric columns" subtitle="Pick a dataset with numeric fields to scan for anomalies." />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card-soft p-5 space-y-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">Z-score anomaly scan</h3>
+            <p className="text-[11px] text-muted-foreground">Flags rows where the standardized value exceeds the threshold.</p>
+          </div>
+          <div className="ml-auto flex items-center gap-3 flex-wrap">
+            <label htmlFor="anomaly-column" className="text-[11px] text-muted-foreground">Column</label>
+            <select
+              id="anomaly-column"
+              value={column}
+              onChange={(e) => setColumn(e.target.value)}
+              data-testid="anomaly-column-select"
+              className="h-8 rounded-md border border-border bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <label htmlFor="anomaly-threshold" className="text-[11px] text-muted-foreground">|z|</label>
+            <input
+              id="anomaly-threshold"
+              type="number"
+              min={1}
+              max={6}
+              step={0.25}
+              value={threshold}
+              onChange={(e) => setThreshold(Number(e.target.value))}
+              data-testid="anomaly-threshold-input"
+              className="h-8 w-20 rounded-md border border-border bg-card px-2 text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-accent/40"
+            />
+          </div>
+        </div>
+
+        {loading && !data && <SkeletonChart />}
+
+        {data && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <StatBlock label="Count" value={data.count.toString()} />
+              <StatBlock label="Rate" value={`${data.rate_pct.toFixed(2)}%`} />
+              <StatBlock label="Threshold" value={`|z| > ${data.threshold.toFixed(1)}`} />
+            </div>
+
+            {data.anomalies.length > 0 ? (
+              <div className="overflow-x-auto max-h-[320px] rounded-lg border border-border">
+                <table className="w-full text-sm">
+                  <thead className="bg-surface sticky top-0">
+                    <tr>
+                      <th className="text-left px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Row</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Value</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Z-score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.anomalies.slice(0, 40).map((p) => (
+                      <tr key={p.index} className="border-t border-border/60">
+                        <td className="px-4 py-2 text-xs font-mono text-muted-foreground">#{p.index}</td>
+                        <td className="px-4 py-2 text-right text-sm tabular-nums">{p.value.toLocaleString()}</td>
+                        <td className={cn(
+                          "px-4 py-2 text-right text-sm tabular-nums font-semibold",
+                          Math.abs(p.z_score) > data.threshold * 1.3 ? "text-destructive" : "text-warning",
+                        )}>
+                          {p.z_score >= 0 ? "+" : ""}{p.z_score.toFixed(3)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">No anomalies at this threshold — try lowering it.</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const SkeletonChart = () => (
+  <div className="space-y-3">
+    <div className="h-64 rounded-lg bg-surface animate-pulse" />
+    <div className="h-3 w-2/3 rounded-full bg-surface animate-pulse" />
+  </div>
+);
+
+const StatBlock = ({ label, value }: { label: string; value: string }) => (
+  <div className="rounded-lg bg-surface border border-border p-3">
+    <p className="text-[11px] text-muted-foreground">{label}</p>
+    <p className="text-lg font-semibold tabular-nums mt-0.5">{value}</p>
   </div>
 );
 

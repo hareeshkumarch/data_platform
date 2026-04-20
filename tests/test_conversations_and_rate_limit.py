@@ -49,6 +49,16 @@ def test_conversations_list_empty() -> None:
     assert isinstance(response.json().get("conversations"), list)
 
 
+def test_llm_metrics_includes_key_source() -> None:
+    response = client.get("/api/v1/metrics/llm")
+    assert response.status_code == 200
+    data = response.json()
+    assert "key_source" in data
+    assert data["key_source"] in {"emergent", "openai", "anthropic", "gemini", "none"}
+    assert "active_provider" in data
+    assert "active_model" in data
+
+
 def test_rate_limit_returns_429_when_exceeded() -> None:
     # The ``report`` bucket limits to 5/min — trigger it with concentrated traffic.
     statuses = [

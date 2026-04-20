@@ -18,6 +18,18 @@ interface SystemStats {
   avg_latency_ms: number;
 }
 
+interface LlmMetrics {
+  calls_24h: number;
+  tokens_in: number;
+  tokens_out: number;
+  avg_latency_ms: number;
+  errors_24h: number;
+  success_rate: number;
+  key_source: "emergent" | "openai" | "anthropic" | "gemini" | "none";
+  active_provider: string;
+  active_model: string;
+}
+
 interface ModelInfo {
   id: string;
   label: string;
@@ -36,6 +48,7 @@ interface ProviderStatus {
 interface SystemMetrics {
   datasetsCount: number;
   stats: SystemStats;
+  llmMetrics: LlmMetrics | null;
 }
 
 /** Settings page — provider switcher, LLM telemetry and runtime preferences. */
@@ -54,14 +67,16 @@ const Settings = () => {
   useEffect(() => {
     (async () => {
       try {
-        const [datasets, stats, providerStatus] = await Promise.allSettled([
+        const [datasets, stats, providerStatus, llmMetrics] = await Promise.allSettled([
           apiFetch<ApiResponse<Dataset>>("/datasets"),
           apiFetch<SystemStats>("/system/stats"),
           apiFetch<ProviderStatus>("/settings/providers"),
+          apiFetch<LlmMetrics>("/metrics/llm"),
         ]);
         setMetrics({
           datasetsCount: datasets.status === "fulfilled" ? datasets.value.datasets?.length ?? 0 : 0,
           stats: stats.status === "fulfilled" ? stats.value : { llm_calls: 0, llm_tokens: 0, success_rate: 100, avg_latency_ms: 0 },
+          llmMetrics: llmMetrics.status === "fulfilled" ? llmMetrics.value : null,
         });
         if (providerStatus.status === "fulfilled") {
           setProviders(providerStatus.value);
@@ -140,17 +155,16 @@ const Settings = () => {
 
         <Section title="Provider & Model" subtitle="Switch LLM providers instantly. Keys live on the server.">
           <div className="card-soft p-5 space-y-6 animate-fade-in-up">
-            <div className="flex items-center gap-3">
-              <span className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-accent-soft text-accent">
-                <Key className="h-4 w-4" />
-              </span>
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground">Universal LLM key</p>
-                <p className="text-xs text-muted-foreground truncate font-mono">
-                  {providers?.key_configured ? providers.key_masked : "Not configured — set EMERGENT_LLM_KEY in backend/.env"}
-                </p>
-              </div>
-            </div>
+            <ProviderCreditsBadge
+              keySource={metrics?.llmMetrics?.key_source ?? "none"}
+              keyMasked={providers?.key_masked}
+              activeProvider={metrics?.llmMetrics?.active_provider ?? provider}
+              activeModel={metrics?.llmMetrics?.active_model ?? model}
+              calls={metrics?.llmMetrics?.calls_24h ?? 0}
+              tokens={metrics?.llmMetrics ? metrics.llmMetrics.tokens_in + metrics.llmMetrics.tokens_out : 0}
+              successRate={metrics?.llmMetrics?.success_rate ?? 100}
+              avgLatencyMs={metrics?.llmMetrics?.avg_latency_ms ?? 0}
+            />
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
@@ -330,5 +344,110 @@ const ToggleRow = ({
     </button>
   </div>
 );
+
+/** Credits / key-source badge rendered at the top of the provider card. */
+const ProviderCreditsBadge = ({
+  keySource, keyMasked, activeProvider, activeModel, calls, tokens, successRate, avgLatencyMs,
+}: {
+  keySource: "emergent" | "openai" | "anthropic" | "gemini" | "none";
+  keyMasked?: string;
+  activeProvider: string;
+  activeModel: string;
+  calls: number;
+  tokens: number;
+  successRate: number;
+  avgLatencyMs: number;
+}) => {
+  const sourceMeta: Record<typeof keySource, { label: string; hint: string; tone: "accent" | "success" | "warning" | "destructive" }> = {
+    emergent: {
+      label: "Emergent Universal",
+      hint: "Covers OpenAI · Anthropic · Gemini through the Emergent proxy.",
+      tone: "accent",
+    },
+    openai: {
+      label: "Direct · OpenAI",
+      hint: "Using your OPENAI_API_KEY — billed against your OpenAI account.",
+      tone: "success",
+    },
+    anthropic: {
+      label: "Direct · Anthropic",
+      hint: "Using your ANTHROPIC_API_KEY — billed against your Anthropic account.",
+      tone: "success",
+    },
+    gemini: {
+      label: "Direct · Gemini",
+      hint: "Using your GEMINI_API_KEY — billed against your Google AI account.",
+      tone: "success",
+    },
+    none: {
+      label: "No key configured",
+      hint: "Set EMERGENT_LLM_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY) in backend/.env.",
+      tone: "destructive",
+    },
+  };
+
+  const meta = sourceMeta[keySource];
+  const toneBg: Record<typeof meta.tone, string> = {
+    accent: "bg-accent-soft text-accent border-accent/20",
+    success: "bg-success/10 text-success border-success/20",
+    warning: "bg-warning/10 text-warning border-warning/20",
+    destructive: "bg-destructive/10 text-destructive border-destructive/20",
+  };
+
+  return (
+    <div data-testid="provider-credits-badge" className="rounded-xl border border-border bg-gradient-to-br from-card to-surface/50 p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className={cn("inline-flex h-8 w-8 items-center justify-center rounded-md border", toneBg[meta.tone])}>
+            <Key className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-foreground">{meta.label}</span>
+              <span className={cn("text-[10px] px-2 py-0.5 rounded-full font-mono uppercase tracking-wider border", toneBg[meta.tone])}>
+                {keySource}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-0.5 truncate max-w-md">{meta.hint}</p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Active model</p>
+          <p className="text-xs font-mono font-semibold text-foreground" data-testid="active-model-label">
+            {activeProvider} / {activeModel}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+        <MiniStat label="Calls" value={calls.toLocaleString()} />
+        <MiniStat label="Tokens" value={tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : String(tokens)} />
+        <MiniStat label="Success" value={`${successRate.toFixed(1)}%`} tone={successRate >= 99 ? "good" : successRate >= 95 ? "warning" : "danger"} />
+        <MiniStat label="Avg latency" value={`${Math.round(avgLatencyMs)} ms`} />
+      </div>
+
+      {keyMasked && (
+        <p className="mt-3 pt-3 border-t border-border/60 text-[11px] text-muted-foreground font-mono truncate">
+          key · {keyMasked}
+        </p>
+      )}
+    </div>
+  );
+};
+
+const MiniStat = ({ label, value, tone = "default" }: { label: string; value: string; tone?: "default" | "good" | "warning" | "danger" }) => {
+  const toneCls = {
+    default: "text-foreground",
+    good: "text-success",
+    warning: "text-warning",
+    danger: "text-destructive",
+  }[tone];
+  return (
+    <div className="rounded-md bg-card/70 border border-border/60 px-3 py-2">
+      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</p>
+      <p className={cn("text-sm font-semibold tabular-nums mt-0.5", toneCls)}>{value}</p>
+    </div>
+  );
+};
 
 export default Settings;
