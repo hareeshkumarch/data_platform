@@ -92,6 +92,9 @@ def seeded_dataset_id() -> str:
     r = requests.post(f"{API}/datasets/seed-demo", timeout=60)
     assert r.status_code in (200, 201, 202), r.text
     body = r.json()
+    # Idempotent reuse path: task_id=null, dataset_id already present
+    if body.get("status") == "success" and body.get("task_id") is None and body.get("dataset_id"):
+        return body["dataset_id"]
     task_id = body.get("task_id") or body.get("id")
     assert task_id, f"no task id in seed response: {body}"
     # Poll task

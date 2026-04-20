@@ -112,7 +112,11 @@ def test_chat_groq_without_key_returns_clear_error():
 def dataset_id() -> str:
     r = requests.post(f"{API}/datasets/seed-demo", timeout=60)
     assert r.status_code in (200, 201, 202), r.text
-    task_id = r.json().get("task_id") or r.json().get("id")
+    body = r.json()
+    # Idempotent reuse path: task_id=null, dataset_id already present
+    if body.get("status") == "success" and body.get("task_id") is None and body.get("dataset_id"):
+        return body["dataset_id"]
+    task_id = body.get("task_id") or body.get("id")
     assert task_id
     deadline = time.time() + 60
     while time.time() < deadline:
@@ -122,11 +126,14 @@ def dataset_id() -> str:
         if tb.get("status") in ("failed", "error", "FAILURE"):
             pytest.fail(f"seed failed: {tb}")
         time.sleep(1.0)
+    # Prefer the dataset_id returned by seed-demo; fallback to scanning list
+    if body.get("dataset_id"):
+        return body["dataset_id"]
     items = requests.get(f"{API}/datasets", timeout=30).json()
     if isinstance(items, dict):
         items = items.get("datasets") or items.get("items") or []
-    with_cols = [d for d in items if d.get("columns")]
-    ds = with_cols[-1] if with_cols else items[-1]
+    sales = [d for d in items if (d.get("name") or "").lower().startswith("sales performance")]
+    ds = sales[0] if sales else items[-1]
     return ds.get("id") or ds.get("dataset_id") or ds.get("table_name")
 
 
