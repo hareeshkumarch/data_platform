@@ -649,7 +649,7 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
               <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-accent animate-blink rounded-sm" />
             )}
 
-            {/* Interactive Debugger / Transparency Layer */}
+            {/* Transparency Layer */}
             {!isUser && !message.streaming && (
               <div className="mt-4 flex flex-wrap gap-2 items-center text-xs">
                 {message.model && (
@@ -658,28 +658,6 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
                     {message.model}
                   </Badge>
                 )}
-                {message.code && (
-                  <button
-                    onClick={() => setShowCode(!showCode)}
-                    className="flex items-center gap-1 text-muted-foreground hover:text-accent transition-colors px-2 py-1 rounded bg-surface/50 border border-border/50 hover:border-accent/30 font-medium"
-                  >
-                    <Settings className="h-3 w-3" />
-                    {showCode ? "Hide Python Source" : "View Python Source"}
-                  </button>
-                )}
-              </div>
-            )}
-
-            {showCode && message.code && (
-              <div className="mt-3 rounded-md bg-[#1a1b26] border border-[#2c2e3e] overflow-hidden shadow-soft">
-                <div className="flex items-center justify-between px-3 py-1.5 bg-[#2c2e3e]/50 border-b border-[#2c2e3e]">
-                  <span className="text-[10px] uppercase tracking-widest text-[#a9b1d6] font-semibold flex items-center gap-1.5">
-                    <Database className="h-3 w-3 text-[#7aa2f7]" /> Generated Pandas AST
-                  </span>
-                </div>
-                <div className="p-3 overflow-x-auto text-[11px] font-mono leading-relaxed text-[#c0caf5]">
-                  <pre className="whitespace-pre-wrap">{message.code}</pre>
-                </div>
               </div>
             )}
           </div>
