@@ -591,6 +591,7 @@ const TabbedChartViewer = ({ charts }: { charts: any[] }) => {
 
 const MessageBlock = ({ message }: { message: QueryMessage }) => {
   const isUser = message.role === "user";
+  const [showCode, setShowCode] = useState(false);
   return (
     <div className={cn("flex gap-2.5 sm:gap-3.5 animate-fade-in-up", isUser && "flex-row-reverse")}>
       <div className={cn(
@@ -646,6 +647,18 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
             )}
             {message.streaming && (
               <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-accent animate-blink rounded-sm" />
+            )}
+
+            {/* Transparency Layer */}
+            {!isUser && !message.streaming && (
+              <div className="mt-4 flex flex-wrap gap-2 items-center text-xs">
+                {message.model && (
+                  <Badge variant="secondary" className="px-2 py-0 text-[10px] uppercase font-medium tracking-wider bg-surface/80 border-border/50 text-muted-foreground/80">
+                    <Sparkles className="h-3 w-3 mr-1" />
+                    {message.model}
+                  </Badge>
+                )}
+              </div>
             )}
           </div>
         )}

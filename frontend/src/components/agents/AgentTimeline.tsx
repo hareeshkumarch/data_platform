@@ -1,6 +1,7 @@
 import { CheckCircle2, Loader2, Circle, AlertCircle, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 export type AgentStatus = "pending" | "running" | "completed" | "failed";
 
@@ -51,7 +52,14 @@ export const AgentTimeline = ({ steps, title = "Agents Running" }: AgentTimeline
         {steps.map((step, i) => {
           const open = expanded === step.id;
           return (
-            <li key={step.id} className="relative animate-fade-in-up" style={{ animationDelay: `${i * 60}ms` }}>
+            <motion.li
+              key={step.id}
+              className="relative"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.05, duration: 0.3, ease: "easeOut" }}
+              layout="position"
+            >
               <button
                 onClick={() => step.logs && setExpanded(open ? null : step.id)}
                 className={cn(
@@ -73,14 +81,23 @@ export const AgentTimeline = ({ steps, title = "Agents Running" }: AgentTimeline
                   <ChevronRight className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform mt-1.5", open && "rotate-90")} />
                 )}
               </button>
-              {open && step.logs && (
-                <div className="ml-9 mb-2 p-3 rounded-md bg-background border border-border animate-fade-in">
-                  <pre className="text-[11px] font-mono text-muted-foreground leading-relaxed whitespace-pre-wrap">
-                    {step.logs.join("\n")}
-                  </pre>
-                </div>
-              )}
-            </li>
+              <AnimatePresence>
+                {open && step.logs && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="ml-9 mb-2 p-3 rounded-md bg-background border border-border">
+                      <pre className="text-[11px] font-mono text-muted-foreground leading-relaxed whitespace-pre-wrap">
+                        {step.logs.join("\n")}
+                      </pre>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.li>
           );
         })}
       </ol>
