@@ -192,6 +192,9 @@ class OrchestratorAgent(BaseAgent):
 
         await self._cache.set_task_progress(correlation_id, 0, "planning")
 
+        results: Dict[str, AgentResult] = {}
+        completed: set = set()
+
         if mode == "dynamic":
             from backend.prompts.templates import ORCHESTRATOR_PROMPT, ORCHESTRATOR_SYSTEM
             from backend.models.schemas import LLMRequest, LLMMode
@@ -199,6 +202,10 @@ class OrchestratorAgent(BaseAgent):
             import json
             
             schema = await self._cache.get_schema(dataset_id)
+            # Evaluate current dataset state to skip unnecessary steps
+            quality_score = schema.get("quality_score", 100) if schema else 100
+            col_count = len(schema.get("columns", [])) if schema else 0
+
             prompt = ORCHESTRATOR_PROMPT.format(
                 user_request=payload.get("question", "Full data analysis"),
                 dataset_state=json.dumps(schema) if schema else "Schema not yet loaded"
@@ -213,13 +220,17 @@ class OrchestratorAgent(BaseAgent):
             try:
                 plan_json, _ = LLMService.extract_json_with_preamble(resp.content)
                 steps = plan_json.get("steps", STATIC_PLANS["full"])
+
+                # Conditional Skipping: if data is clean and small, skip feature engineering
+                if quality_score > 90 and col_count < 10:
+                    steps = [s for s in steps if s["agent"] != "feature"]
+
             except Exception as e:
                 logger.error(f"Dynamic planning failed, falling back to full: {e}")
                 steps = STATIC_PLANS["full"]
         else:
             steps = STATIC_PLANS.get(mode, STATIC_PLANS["full"])
-        results: Dict[str, AgentResult] = {}
-        completed: set = set()
+
         total = len(steps)
 
         groups: Dict[Optional[int], List[Dict]] = {}
@@ -325,13 +336,24 @@ class OrchestratorAgent(BaseAgent):
             "model_override": global_payload.get("model"),
         }
 
-        for attempt in range(1, settings.CELERY_MAX_RETRIES + 1):
+        # Advanced DAG explicit retry strategy config
+        max_retries = step.get("config", {}).get("max_retries", settings.CELERY_MAX_RETRIES)
+        fallback_agent_name = step.get("config", {}).get("fallback_agent")
+
+        for attempt in range(1, max_retries + 1):
             result = await agent.execute(step_payload, correlation_id)
             if result.success:
                 return result
-            if attempt < settings.CELERY_MAX_RETRIES:
+            if attempt < max_retries:
                 wait = min(settings.CELERY_RETRY_BACKOFF * (2 ** (attempt - 1)), 30)
-                logger.warning("Step retry", agent=name, attempt=attempt, wait=wait)
+                logger.warning("Step retry", agent=name, attempt=attempt, wait=wait, error=result.error)
                 await asyncio.sleep(wait)
+
+        # Fallback mechanism if main agent fails
+        if not result.success and fallback_agent_name:
+            logger.warning(f"Agent {name} failed after {max_retries} attempts. Triggering fallback: {fallback_agent_name}")
+            fallback_agent = self._agents.get(fallback_agent_name)
+            if fallback_agent:
+                return await fallback_agent.execute(step_payload, correlation_id)
 
         return result
