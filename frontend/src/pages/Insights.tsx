@@ -402,10 +402,6 @@ const ForecastPanel = ({
   data: ForecastResponse | null;
   loading: boolean;
 }) => {
-  if (columns.length === 0) {
-    return <EmptyState icon={LineChart} title="No numeric columns" subtitle="Forecasting needs at least one numeric + one date column." />;
-  }
-
   const chartData = useMemo(() => {
     if (!data) return [];
     const history = data.history.map((p) => ({ date: p.date, history: p.value }));
@@ -420,6 +416,10 @@ const ForecastPanel = ({
     }
     return Array.from(merged.values());
   }, [data]);
+
+  if (columns.length === 0) {
+    return <EmptyState icon={LineChart} title="No numeric columns" subtitle="Forecasting needs at least one numeric + one date column." />;
+  }
 
   const slopeLabel = data
     ? `${data.slope > 0 ? "+" : ""}${data.slope.toFixed(3)} per period`

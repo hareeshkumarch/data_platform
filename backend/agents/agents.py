@@ -1,7 +1,10 @@
 from __future__ import annotations
+import ast
 import asyncio
 import hashlib
 import json
+import multiprocessing
+import queue
 from typing import Any, Dict, List
 
 import numpy as np
@@ -613,9 +616,6 @@ class InsightAgent(BaseAgent):
 # ─────────────────────────────────────────────────────────────────────────────
 # QUERY AGENT
 # ─────────────────────────────────────────────────────────────────────────────
-import ast
-import multiprocessing
-import queue
 
 def _secure_runner(code_str: str, input_df: pd.DataFrame, out_queue: multiprocessing.Queue):
     try:
