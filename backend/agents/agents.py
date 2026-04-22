@@ -634,7 +634,13 @@ class QueryAgent(BaseAgent):
             raise ValueError(f"Dataset {dataset_id} not loaded.")
 
         rag_context = await self._vector.retrieve(dataset_id, question)
-        intent = self._detect_intent(question)
+
+        # 1. Query Understanding Layer
+        # Attempt to inject short term memory into context
+        session_id = payload.get("session_id", f"session_{dataset_id}")
+        past_queries = await self._cache.get_json(f"memory:{session_id}") or []
+
+        intent, query_type = await self._understand_query(question, past_queries, payload)
 
         schema_json = json.dumps(
             {
@@ -654,64 +660,6 @@ class QueryAgent(BaseAgent):
             or payload.get("model")
         )
 
-        req = LLMRequest(
-            prompt=build_query_prompt(
-                schema_json,
-                sample_str,
-                rag_context,
-                question,
-                intent,
-                payload.get("output_format", "table"),
-            ),
-            system_prompt=QUERY_SYSTEM,
-            provider=payload.get("llm_provider"),
-            model_override=model_name,
-            mode=LLMMode.ADVANCED,
-            temperature=0.1,
-            max_tokens=2048,
-        )
-        resp = await self._llm.complete(req)
-
-        try:
-            plan, preamble = LLMService.extract_json_with_preamble(resp.content)
-            if isinstance(plan, list) and len(plan) > 0:
-                plan = plan[0]
-            if not isinstance(plan, dict):
-                plan = {}
-
-            # If the extracted JSON misses the core required keys, it might be an accidentally
-            # parsed inner structure (like a DataFrame dict) due to a truncated LLM response.
-            if plan and not any(
-                k in plan
-                for k in [
-                    "generated_code",
-                    "explanation",
-                    "query_type",
-                    "suggested_chart",
-                ]
-            ):
-                raise ValueError(
-                    "Parsed JSON does not match the expected Query schema."
-                )
-
-            # Use preamble if explanation is missing or very short compared to preamble
-            if preamble and len(plan.get("explanation", "")) < 30:
-                plan["explanation"] = preamble
-        except Exception as e:
-            # Fallback for purely textual responses (no JSON found) or failed inner parsing
-            clean_content = resp.content.strip()
-            if not any(c in clean_content for c in ("{", "[")):
-                plan = {"explanation": clean_content, "generated_code": ""}
-            else:
-                logger.error(
-                    "query agent failed to parse json",
-                    error=str(e),
-                    content=resp.content[:500],
-                )
-                raise ValueError(
-                    f"I couldn't understand the AI's response format: {str(e)}"
-                )
-
         df = pd.DataFrame(rows)
         for col in schema.get("columns", []):
             if col["name"] not in df.columns:
@@ -721,9 +669,77 @@ class QueryAgent(BaseAgent):
             elif col["inferred_type"] == "numeric":
                 df[col["name"]] = pd.to_numeric(df[col["name"]], errors="coerce")
 
-        execution = await asyncio.to_thread(
-            self._exec_code, plan.get("generated_code", ""), df
-        )
+        # 2. Multi-Pass Generation
+        MAX_RETRIES = 3
+        execution = {"error": "Initialization failure."}
+        plan = {}
+        error_feedback = ""
+        explanation = ""
+
+        # Formatting past queries to string for the prompt
+        past_queries_str = "\n".join([f"Q: {q.get('question')}\nA: {q.get('explanation', '')}" for q in past_queries[-3:]]) if past_queries else "No previous queries."
+
+        for attempt in range(MAX_RETRIES):
+            req = LLMRequest(
+                prompt=build_query_prompt(
+                    schema_json,
+                    sample_str,
+                    rag_context,
+                    question,
+                    intent,
+                    payload.get("output_format", "table"),
+                ) + (f"\n\nPrevious Error Feedback to Fix:\n{error_feedback}" if error_feedback else "") + (f"\n\nPast Query Context:\n{past_queries_str}" if past_queries else ""),
+                system_prompt=QUERY_SYSTEM,
+                provider=payload.get("llm_provider"),
+                model_override=model_name,
+                mode=LLMMode.ADVANCED,
+                temperature=0.1 if attempt == 0 else 0.4,
+                max_tokens=2048,
+            )
+            resp = await self._llm.complete(req)
+
+            try:
+                plan, preamble = LLMService.extract_json_with_preamble(resp.content)
+                if isinstance(plan, list) and len(plan) > 0:
+                    plan = plan[0]
+                if not isinstance(plan, dict):
+                    plan = {}
+
+                if plan and not any(
+                    k in plan
+                    for k in [
+                        "generated_code",
+                        "explanation",
+                        "query_type",
+                        "suggested_chart",
+                    ]
+                ):
+                    raise ValueError("Parsed JSON does not match the expected Query schema.")
+
+                if preamble and len(plan.get("explanation", "")) < 30:
+                    plan["explanation"] = preamble
+            except Exception as e:
+                clean_content = resp.content.strip()
+                if not any(c in clean_content for c in ("{", "[")):
+                    plan = {"explanation": clean_content, "generated_code": ""}
+                else:
+                    logger.error("query agent failed to parse json", error=str(e), content=resp.content[:500])
+                    error_feedback = f"JSON Parse Error: {str(e)}. Ensure you output valid JSON."
+                    continue
+
+            code = plan.get("generated_code", "")
+            if not code.strip():
+                execution = {"columns": [], "rows": [], "row_count": 0, "error": None}
+                break
+
+            # BUGFIX applied from code review: we MUST pass a df.copy() to execution
+            execution = await asyncio.to_thread(self._exec_code, code, df.copy())
+
+            if not execution.get("error"):
+                break # Success!
+
+            error_feedback = f"Execution failed with error:\n{execution.get('error')}\n\nPlease fix the Pandas code and try again."
+            logger.warning(f"Query generation attempt {attempt + 1} failed.", error=execution.get("error"))
 
         # Robust explanation extraction
         explanation = (
@@ -801,6 +817,32 @@ class QueryAgent(BaseAgent):
             "rows": sanitize_rows(rdf.to_dict("records")),
             "row_count": len(rdf),
         }
+
+    async def _understand_query(self, question: str, past_queries: list, payload: Dict) -> tuple[str, str]:
+        # Intelligent Query Understanding Layer using LLM
+        from backend.prompts.templates import QUERY_UNDERSTANDING_PROMPT, QUERY_UNDERSTANDING_SYSTEM
+
+        req = LLMRequest(
+            prompt=QUERY_UNDERSTANDING_PROMPT.format(question=question, history="\n".join([q.get("question", "") for q in past_queries[-3:]])),
+            system_prompt=QUERY_UNDERSTANDING_SYSTEM,
+            provider=payload.get("llm_provider"),
+            model_override=payload.get("model_override"),
+            mode=LLMMode.FAST,
+            temperature=0.0,
+            max_tokens=256
+        )
+
+        try:
+            resp = await self._llm.complete(req)
+            data, _ = LLMService.extract_json_with_preamble(resp.content)
+            if not isinstance(data, dict):
+                data = {}
+            intent = data.get("intent", "general")
+            query_type = data.get("query_type", "aggregation")
+            return intent, query_type
+        except Exception as e:
+            logger.error(f"Query Understanding failed, falling back to heuristics: {e}")
+            return self._detect_intent(question), "aggregation"
 
     def _detect_intent(self, q: str) -> str:
         q = q.lower()
