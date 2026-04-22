@@ -1,6 +1,7 @@
 import { useState, ReactNode } from "react";
 import { ChevronDown, TrendingUp, TrendingDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { motion, AnimatePresence } from "framer-motion";
 
 export interface Metric {
   label: string;
@@ -74,37 +75,46 @@ export const InsightCard = ({
         </div>
       </header>
 
-      {open && (
-        <div className="mt-4 pt-4 border-t border-border animate-fade-in space-y-5">
-          <p className="text-sm text-foreground leading-relaxed font-medium">{explanation}</p>
-          
-          {metrics && metrics.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {metrics.map((m) => (
-                <div key={m.label} className="rounded-md bg-surface border border-border px-3 py-2.5">
-                  <p className="text-[11px] text-muted-foreground">{m.label}</p>
-                  <div className="flex items-baseline gap-1.5 mt-0.5">
-                    <span className="text-sm font-semibold text-foreground font-mono">{m.value}</span>
-                    {typeof m.delta === "number" && (
-                      <span
-                        className={cn(
-                          "inline-flex items-center text-[10px] font-medium",
-                          m.delta >= 0 ? "text-success" : "text-destructive"
-                        )}
-                      >
-                        {m.delta >= 0 ? <TrendingUp className="h-2.5 w-2.5" /> : <TrendingDown className="h-2.5 w-2.5" />}
-                        {Math.abs(m.delta)}%
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-4 pt-4 border-t border-border space-y-5">
+              <p className="text-sm text-foreground leading-relaxed font-medium">{explanation}</p>
 
-          {children}
-        </div>
-      )}
+              {metrics && metrics.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  {metrics.map((m) => (
+                    <div key={m.label} className="rounded-md bg-surface border border-border px-3 py-2.5">
+                      <p className="text-[11px] text-muted-foreground">{m.label}</p>
+                      <div className="flex items-baseline gap-1.5 mt-0.5">
+                        <span className="text-sm font-semibold text-foreground font-mono">{m.value}</span>
+                        {typeof m.delta === "number" && (
+                          <span
+                            className={cn(
+                              "inline-flex items-center text-[10px] font-medium",
+                              m.delta >= 0 ? "text-success" : "text-destructive"
+                            )}
+                          >
+                            {m.delta >= 0 ? <TrendingUp className="h-2.5 w-2.5" /> : <TrendingDown className="h-2.5 w-2.5" />}
+                            {Math.abs(m.delta)}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <button
         onClick={() => setOpen(!open)}
