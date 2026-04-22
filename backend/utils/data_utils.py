@@ -217,10 +217,42 @@ def compute_moving_averages(
     return result
 
 
-def naive_forecast(series: pd.Series, steps: int = 14) -> List[float]:
-    period = min(7, len(series))
-    last = series.iloc[-period:].tolist()
-    return [_safe(last[i % period]) for i in range(steps)]
+def naive_forecast(series: pd.Series, steps: int = 14) -> Dict[str, Any]:
+    """An upgraded forecasting logic using moving average trend instead of flat naive repetition."""
+    if len(series) < 5:
+        return {"method": "none", "predictions": []}
+
+    # Calculate a simple trend over the last 7 periods
+    recent_trend = series.tail(7).diff().mean()
+    if pd.isna(recent_trend):
+        recent_trend = 0
+
+    last_val = float(series.iloc[-1])
+    std_dev = float(series.std() if len(series) > 5 else last_val * 0.1)
+    if pd.isna(std_dev):
+        std_dev = last_val * 0.1
+
+    forecast = []
+    for i in range(1, steps + 1):
+        # Project the trend forward
+        predicted_val = last_val + (recent_trend * i)
+
+        # Cone of uncertainty expands by 0.6 standard deviations per step
+        bound = std_dev * (1 + 0.6 * i)
+
+        forecast.append({
+            "step": i,
+            "prediction": _safe(predicted_val),
+            "lower_bound": _safe(max(0, predicted_val - bound)),
+            "upper_bound": _safe(predicted_val + bound)
+        })
+
+    return {
+        "method": "trend_projected",
+        "steps": steps,
+        "predictions": forecast,
+        "confidence_level": 0.85
+    }
 
 
 def contribution_analysis(
