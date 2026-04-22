@@ -556,15 +556,23 @@ class InsightAgent(BaseAgent):
                 "executive_summary": "I summarized the findings above but couldn't parse the detailed insights structure.",
             }
 
+        # CRITIC LOOP: Fast review to filter out hallucinated insights
+        valid_insights = []
         for i, ins in enumerate(data.get("insights", [])):
-            ins.setdefault("priority", i + 1)
-            ins.setdefault("confidence", 0.8)
-            ins.setdefault("action_items", [])
-            ins.setdefault("related_columns", [])
+            is_valid, confidence, explanation = await self._critique_insight(ins, eda, payload)
+            if is_valid:
+                ins.setdefault("priority", i + 1)
+                ins.setdefault("confidence", confidence)
+                ins.setdefault("action_items", [])
+                ins.setdefault("related_columns", [])
+                ins["validation_explanation"] = explanation # Explainability layer
+                valid_insights.append(ins)
+            else:
+                logger.info(f"Critic loop rejected insight: {ins.get('title')} - {explanation}")
 
         result = {
             "dataset_id": dataset_id,
-            "insights": data.get("insights", []),
+            "insights": valid_insights,
             "executive_summary": data.get("executive_summary", ""),
             "provider": resp.provider.value,
             "model": resp.model,
@@ -572,6 +580,34 @@ class InsightAgent(BaseAgent):
         }
         await self._cache.set_insights(dataset_id, result)
         return result
+
+    async def _critique_insight(self, insight: Dict, eda: Dict, payload: Dict) -> tuple[bool, float, str]:
+        """Critic Agent loop to validate if the insight is factually backed by the raw statistics."""
+        from backend.prompts.templates import INSIGHT_CRITIC_PROMPT, INSIGHT_CRITIC_SYSTEM
+
+        req = LLMRequest(
+            prompt=INSIGHT_CRITIC_PROMPT.format(
+                insight=json.dumps(insight, indent=2),
+                stats=json.dumps(eda.get("summary_stats", {}))[:1500] # Provide raw stats as ground truth
+            ),
+            system_prompt=INSIGHT_CRITIC_SYSTEM,
+            provider=payload.get("llm_provider"),
+            model_override=payload.get("model_override"),
+            mode=LLMMode.FAST,
+            temperature=0.0,
+            max_tokens=256
+        )
+
+        try:
+            resp = await self._llm.complete(req)
+            data, _ = LLMService.extract_json_with_preamble(resp.content)
+            is_valid = data.get("is_valid", True)
+            confidence = float(data.get("confidence", 0.8))
+            explanation = data.get("explanation", "Validated against raw statistics.")
+            return is_valid, confidence, explanation
+        except Exception as e:
+            logger.error(f"Insight critic failed: {e}")
+            return True, 0.7, "Critic validation skipped due to error."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -635,30 +671,45 @@ class QueryAgent(BaseAgent):
 
         rag_context = await self._vector.retrieve(dataset_id, question)
 
-        # 1. Query Understanding Layer
+        # 1. Query Understanding & Schema RAG Layer
         # Attempt to inject short term memory into context
         session_id = payload.get("session_id", f"session_{dataset_id}")
         past_queries = await self._cache.get_json(f"memory:{session_id}") or []
 
-        intent, query_type = await self._understand_query(question, past_queries, payload)
+        intent, query_type, model_tier = await self._understand_query(question, past_queries, payload)
+
+        # Dynamic Schema RAG Filter (Top-K selection)
+        all_columns = schema.get("columns", [])
+        if len(all_columns) > 15:
+            relevant_columns = await self._select_relevant_columns(question, all_columns, payload)
+        else:
+            relevant_columns = all_columns
 
         schema_json = json.dumps(
             {
                 "columns": [
                     {"name": c["name"], "type": c["inferred_type"]}
-                    for c in schema.get("columns", [])
+                    for c in relevant_columns
                 ]
             },
             indent=2,
         )
-        sample_str = json.dumps(rows[:5], default=str)
 
-        # Resolve model from common payload keys
+        # Also filter the sample rows to only show relevant columns
+        relevant_col_names = {c["name"] for c in relevant_columns}
+        filtered_rows = []
+        for r in rows[:5]:
+            filtered_rows.append({k: v for k, v in r.items() if k in relevant_col_names})
+        sample_str = json.dumps(filtered_rows, default=str)
+
+        # Resolve model from common payload keys, falling back to dynamic tier routing
         model_name = (
             payload.get("model_override")
             or payload.get("llm_model")
             or payload.get("model")
         )
+
+        mode = LLMMode.FAST if model_tier == "fast" else LLMMode.ADVANCED
 
         df = pd.DataFrame(rows)
         for col in schema.get("columns", []):
@@ -692,7 +743,7 @@ class QueryAgent(BaseAgent):
                 system_prompt=QUERY_SYSTEM,
                 provider=payload.get("llm_provider"),
                 model_override=model_name,
-                mode=LLMMode.ADVANCED,
+                mode=mode,
                 temperature=0.1 if attempt == 0 else 0.4,
                 max_tokens=2048,
             )
@@ -775,6 +826,7 @@ class QueryAgent(BaseAgent):
                 "query_type": plan.get("query_type", "pandas"),
                 "explanation": explanation,
                 "optimizations_applied": plan.get("optimizations_applied", []),
+                "confidence_score": plan.get("confidence", 0.9 if not execution.get("error") else 0.2),
             },
             "result": execution,
             "suggested_chart": plan.get("suggested_chart", "table"),
@@ -818,7 +870,7 @@ class QueryAgent(BaseAgent):
             "row_count": len(rdf),
         }
 
-    async def _understand_query(self, question: str, past_queries: list, payload: Dict) -> tuple[str, str]:
+    async def _understand_query(self, question: str, past_queries: list, payload: Dict) -> tuple[str, str, str]:
         # Intelligent Query Understanding Layer using LLM
         from backend.prompts.templates import QUERY_UNDERSTANDING_PROMPT, QUERY_UNDERSTANDING_SYSTEM
 
@@ -839,10 +891,44 @@ class QueryAgent(BaseAgent):
                 data = {}
             intent = data.get("intent", "general")
             query_type = data.get("query_type", "aggregation")
-            return intent, query_type
+            model_tier = data.get("model_tier", "fast")
+            return intent, query_type, model_tier
         except Exception as e:
             logger.error(f"Query Understanding failed, falling back to heuristics: {e}")
-            return self._detect_intent(question), "aggregation"
+            return self._detect_intent(question), "aggregation", "fast"
+
+    async def _select_relevant_columns(self, question: str, all_columns: List[Dict], payload: Dict) -> List[Dict]:
+        """Schema RAG: Dynamically filter columns to fit into context without overwhelming the LLM."""
+        from backend.prompts.templates import SCHEMA_FILTER_SYSTEM, SCHEMA_FILTER_PROMPT
+
+        # Format a lightweight version of the schema for the LLM
+        schema_summary = "\n".join([f"- {c['name']} ({c['inferred_type']})" for c in all_columns])
+
+        req = LLMRequest(
+            prompt=SCHEMA_FILTER_PROMPT.format(question=question, schema=schema_summary),
+            system_prompt=SCHEMA_FILTER_SYSTEM,
+            provider=payload.get("llm_provider"),
+            model_override=payload.get("model_override"),
+            mode=LLMMode.FAST,
+            temperature=0.0,
+        )
+
+        try:
+            resp = await self._llm.complete(req)
+            data, _ = LLMService.extract_json_with_preamble(resp.content)
+            selected_names = set(data.get("selected_columns", []))
+
+            # Map selected names back to original column dicts
+            filtered = [c for c in all_columns if c["name"] in selected_names]
+
+            # Fallback if LLM returned bad structure or no columns
+            if not filtered:
+                return all_columns[:20]
+            return filtered
+
+        except Exception as e:
+            logger.error(f"Schema filtering failed, falling back to top 20 cols: {e}")
+            return all_columns[:20]
 
     def _detect_intent(self, q: str) -> str:
         q = q.lower()
