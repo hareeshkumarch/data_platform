@@ -54,7 +54,7 @@ export const MetricTile = ({
         <span className="text-2xl font-semibold text-foreground font-mono tracking-tight tabular-nums">
           {display}
         </span>
-        {typeof delta === "number" && (
+        {typeof delta === "number" && Number.isFinite(delta) && (
           <span
             className={cn(
               "inline-flex items-center text-[11px] font-medium",

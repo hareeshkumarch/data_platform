@@ -20,6 +20,30 @@ from backend.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Singletons so concurrent WebSocket connections share the global LLM semaphore
+# and the in-memory cache (matches the HTTP dependency-injection pattern in
+# backend.api.routes.endpoints).
+_cache_singleton: "CacheService | None" = None
+_llm_singleton: "LLMService | None" = None
+_vector_singleton = None
+_storage_singleton = None
+
+
+def _get_shared_services():
+    global _cache_singleton, _llm_singleton, _vector_singleton, _storage_singleton
+    if _cache_singleton is None:
+        _cache_singleton = CacheService()
+    if _llm_singleton is None:
+        _llm_singleton = LLMService(_cache_singleton)
+    if _vector_singleton is None:
+        from backend.services.vector_service import VectorService
+        _vector_singleton = VectorService()
+    if _storage_singleton is None:
+        from backend.services.storage_service import StorageService
+        _storage_singleton = StorageService()
+    return _cache_singleton, _llm_singleton, _vector_singleton, _storage_singleton
+
+
 _PIPELINE_BLUEPRINT: List[Dict[str, Any]] = [
     {
         "id": "ingestion",
@@ -292,13 +316,7 @@ def register_websockets(app: FastAPI) -> None:
             await websocket.send_json({"type": "stage", "stages": stages})
 
         started = time.perf_counter()
-        cache = CacheService()
-        llm = LLMService(cache)
-        from backend.services.vector_service import VectorService
-        from backend.services.storage_service import StorageService
-
-        vector = VectorService()
-        storage = StorageService()
+        cache, llm, vector, storage = _get_shared_services()
 
         from backend.agents.orchestrator.orchestrator_agent import OrchestratorAgent
 
@@ -403,8 +421,7 @@ def register_websockets(app: FastAPI) -> None:
             await websocket.close()
             return
 
-        cache = CacheService()
-        llm = LLMService(cache)
+        cache, llm, _, _ = _get_shared_services()
         try:
             from backend.models.schemas import LLMMode, LLMRequest
 

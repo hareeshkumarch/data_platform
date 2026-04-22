@@ -153,6 +153,7 @@ class QueryReq(BaseModel):
     use_cache: bool = True
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
+    session_id: Optional[str] = None
 
     @field_validator("question")
     @classmethod
@@ -274,6 +275,47 @@ async def health(cache: CacheService = Depends(get_cache)):
     }
 
 
+@router.get("/health/deep")
+async def health_deep(
+    cache: CacheService = Depends(get_cache),
+    llm: LLMService = Depends(get_llm),
+):
+    """Deep health check: validates cache ping + LLM connectivity with a tiny probe call."""
+    cache_ok = await cache.ping()
+    llm_ok = False
+    llm_error = None
+    try:
+        probe = await llm.complete(
+            LLMRequest(
+                prompt="Say 'ok' only.",
+                system_prompt="You are a health probe. Reply with exactly 'ok'.",
+                mode=LLMMode.FAST,
+                max_tokens=4,
+                use_cache=False,
+            )
+        )
+        llm_ok = "ok" in (probe.content or "").lower()
+    except Exception as exc:
+        llm_error = str(exc)
+
+    status = "ok" if (cache_ok and llm_ok) else "degraded"
+    if not cache_ok and not llm_ok:
+        status = "critical"
+
+    return {
+        "status": status,
+        "version": settings.APP_VERSION,
+        "checks": {
+            "cache": {"status": "pass" if cache_ok else "fail"},
+            "llm": {
+                "status": "pass" if llm_ok else "fail",
+                "error": llm_error,
+                "circuit_status": llm.get_circuit_status(),
+            },
+        },
+    }
+
+
 @router.delete("/system/clear")
 async def clear_system(
     storage: StorageService = Depends(get_storage),
@@ -345,7 +387,23 @@ async def upload_data(
     storage: StorageService = Depends(get_storage),
     request: Request = None,
 ):
-    content = await file.read()
+    # Stream-read the upload so we can reject oversized files without pulling
+    # the full payload into memory first.
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit.",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     filename = file.filename or "upload.csv"
     ok, msg = InputGuardrails.validate_file_upload(
         filename, len(content), file.content_type or ""
@@ -703,10 +761,44 @@ async def run_analytics(
         return _analytics.segment_analysis(
             df, cfg["segment_col"], cfg.get("metric_cols", num_cols[:3])
         )
+    elif body.analysis_type == "distribution":
+        return _analytics.distribution_analysis(df, num_cols)
+    elif body.analysis_type == "data_quality":
+        return _analytics.data_quality_score(df, schema.get("columns", []))
+    elif body.analysis_type == "relationships":
+        return _analytics.column_relationships(df)
+    elif body.analysis_type == "ts_decomposition":
+        return _analytics.ts_decomposition(
+            df, cfg["date_col"], cfg["value_col"], cfg.get("period", 7)
+        )
+    elif body.analysis_type == "drift":
+        return _analytics.drift_detection(df, num_cols, cfg.get("split_ratio", 0.5))
+    elif body.analysis_type == "feature_importance":
+        return _analytics.feature_importance(df, cfg["target_col"], num_cols)
+    elif body.analysis_type == "forecast":
+        return _analytics.forecast_series(
+            df,
+            cfg["date_col"],
+            cfg["value_col"],
+            cfg.get("horizon", 14),
+            cfg.get("method", "auto"),
+        )
+    elif body.analysis_type == "seasonal_anomalies":
+        return _analytics.seasonal_anomalies(
+            df,
+            cfg["date_col"],
+            cfg["value_col"],
+            cfg.get("period", 7),
+            cfg.get("z_threshold", 3.0),
+        )
     else:
         raise HTTPException(
             400,
-            f"Unknown analysis_type '{body.analysis_type}'. Valid: kpis, cohort, funnel, group_aggregate, correlation, outlier_summary, profile, trend, segment",
+            "Unknown analysis_type '{t}'. Valid: kpis, cohort, funnel, "
+            "group_aggregate, correlation, outlier_summary, profile, trend, "
+            "segment, distribution, data_quality, relationships, "
+            "ts_decomposition, drift, feature_importance, forecast, "
+            "seasonal_anomalies".format(t=body.analysis_type),
         )
 
 
@@ -737,20 +829,24 @@ async def compare_datasets(body: CompareReq, cache: CacheService = Depends(get_c
     from backend.utils.data_utils import _safe
 
     if body.metric_col in df_a.columns and body.metric_col in df_b.columns:
-        sa, sb = df_a[body.metric_col].dropna(), df_b[body.metric_col].dropna()
+        sa, sb = pd.to_numeric(df_a[body.metric_col], errors="coerce").dropna(), pd.to_numeric(df_b[body.metric_col], errors="coerce").dropna()
+        a_mean = float(sa.mean()) if len(sa) > 0 else 0.0
+        b_mean = float(sb.mean()) if len(sb) > 0 else 0.0
+        import math
+        mean_diff_pct = (
+            round((b_mean - a_mean) / abs(a_mean) * 100, 2)
+            if math.isfinite(a_mean) and a_mean != 0 and math.isfinite(b_mean)
+            else None
+        )
         result["metric_comparison"] = {
             "column": body.metric_col,
-            "a_mean": _safe(sa.mean()),
-            "b_mean": _safe(sb.mean()),
-            "a_sum": _safe(sa.sum()),
-            "b_sum": _safe(sb.sum()),
-            "a_std": _safe(sa.std()),
-            "b_std": _safe(sb.std()),
-            "mean_diff_pct": round(
-                (float(sb.mean()) - float(sa.mean())) / abs(float(sa.mean())) * 100, 2
-            )
-            if sa.mean() != 0
-            else None,
+            "a_mean": _safe(sa.mean()) if len(sa) > 0 else None,
+            "b_mean": _safe(sb.mean()) if len(sb) > 0 else None,
+            "a_sum": _safe(sa.sum()) if len(sa) > 0 else None,
+            "b_sum": _safe(sb.sum()) if len(sb) > 0 else None,
+            "a_std": _safe(sa.std()) if len(sa) > 0 else None,
+            "b_std": _safe(sb.std()) if len(sb) > 0 else None,
+            "mean_diff_pct": mean_diff_pct,
         }
     return result
 
@@ -854,6 +950,7 @@ async def query(
                 "use_cache": body.use_cache,
                 "llm_provider": body.llm_provider,
                 "model_override": body.llm_model,
+                "session_id": body.session_id,
                 "correlation_id": str(uuid.uuid4()),
             }
         },
@@ -864,6 +961,83 @@ async def query(
         "question": body.question,
         "task_id": task.id,
         "status": "pending",
+    }
+
+
+# ── Query Debugger ────────────────────────────────────────────────────────────
+
+
+class QueryDebugReq(BaseModel):
+    dataset_id: str
+    code: str
+
+
+@router.post("/query-debug/{dataset_id}")
+async def query_debug_exec(
+    dataset_id: str,
+    body: QueryDebugReq,
+    cache: CacheService = Depends(get_cache),
+):
+    """Execute user-edited Pandas code against a dataset (query debugger)."""
+    if not await cache.get_schema(dataset_id):
+        raise HTTPException(404, f"Dataset '{dataset_id}' not found.")
+
+    df, schema = await _get_df_and_schema(dataset_id, cache)
+    from backend.agents.agents import _validate_code_ast, _secure_runner
+    import multiprocessing
+    import queue
+
+    code = body.code
+    try:
+        _validate_code_ast(code)
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "rows": [], "columns": []}
+
+    ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_secure_runner, args=(code, df.copy(), q), daemon=True)
+    p.start()
+
+    def _kill() -> None:
+        if p.is_alive():
+            try:
+                p.terminate()
+                p.join(timeout=2.0)
+                if p.is_alive():
+                    p.kill()
+                    p.join(timeout=1.0)
+            except Exception:
+                pass
+
+    try:
+        result = q.get(timeout=10.0)
+        p.join(timeout=2.0)
+        _kill()
+        if result.get("status") == "error":
+            return {"success": False, "error": result.get("error"), "rows": [], "columns": []}
+        rdf = result.get("data")
+    except queue.Empty:
+        _kill()
+        return {"success": False, "error": "Execution timeout (10s exceeded).", "rows": [], "columns": []}
+    except Exception as e:
+        _kill()
+        return {"success": False, "error": f"{type(e).__name__}: {e}", "rows": [], "columns": []}
+
+    if rdf is None:
+        rdf = pd.DataFrame()
+    if isinstance(rdf, pd.Series):
+        rdf = rdf.reset_index()
+        rdf.columns = ["index", "value"]
+    if not isinstance(rdf, pd.DataFrame):
+        rdf = pd.DataFrame({"result": [rdf]})
+    rdf = rdf.head(500)
+    from backend.utils.data_utils import sanitize_rows
+
+    return {
+        "success": True,
+        "columns": list(rdf.columns),
+        "rows": sanitize_rows(rdf.to_dict("records")),
+        "row_count": len(rdf),
     }
 
 
@@ -1345,19 +1519,24 @@ async def task_status(task_id: str):
     rec = get_task_record(task_id)
     if rec is None:
         return {"task_id": task_id, "status": "unknown", "progress": 0.0}
-    status = rec.state.lower()
+    state = getattr(rec, "state", None) or "unknown"
+    status = state.lower()
+    try:
+        progress = float(getattr(rec, "progress", 0) or 0)
+    except (TypeError, ValueError):
+        progress = 0.0
     resp: Dict[str, Any] = {
         "task_id": task_id,
         "status": status,
-        "progress": float(rec.progress),
+        "progress": progress,
     }
-    if rec.state == "SUCCESS":
+    if state == "SUCCESS":
         # Deep-sanitize to convert numpy/pandas objects to JSON-safe primitives
-        resp["result"] = _convert(rec.result)
-    elif rec.state == "FAILURE":
-        resp["error"] = rec.error
-    elif rec.state == "PROGRESS":
-        resp["stage"] = rec.stage
+        resp["result"] = _convert(getattr(rec, "result", None))
+    elif state == "FAILURE":
+        resp["error"] = getattr(rec, "error", "Unknown error")
+    elif state == "PROGRESS":
+        resp["stage"] = getattr(rec, "stage", "")
     return resp
 
 
@@ -1390,12 +1569,12 @@ async def llm_metrics(llm: LLMService = Depends(get_llm)):
     else:
         key_source = "none"
     return {
-        "calls_24h": stats["llm_calls"],
-        "tokens_in": stats["llm_tokens_in"],
-        "tokens_out": stats["llm_tokens_out"],
-        "avg_latency_ms": stats["avg_latency_ms"],
-        "errors_24h": stats["llm_errors"],
-        "success_rate": stats["success_rate"],
+        "calls_24h": stats.get("llm_calls", 0),
+        "tokens_in": stats.get("llm_tokens_in", 0),
+        "tokens_out": stats.get("llm_tokens_out", 0),
+        "avg_latency_ms": stats.get("avg_latency_ms", 0),
+        "errors_24h": stats.get("llm_errors", 0),
+        "success_rate": stats.get("success_rate", "100%"),
         "key_source": key_source,
         "active_provider": _s.DEFAULT_LLM_PROVIDER,
         "active_model": _s.DEFAULT_LLM_MODEL,

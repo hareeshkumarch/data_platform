@@ -260,7 +260,7 @@ def contribution_analysis(
 ) -> List[Dict[str, Any]]:
     g = df.groupby(dim_col)[metric_col].sum().reset_index()
     total = g[metric_col].sum()
-    g["pct"] = (g[metric_col] / total * 100).round(2)
+    g["pct"] = (g[metric_col] / (total if total != 0 else 1) * 100).round(2)
     return _convert(g.sort_values("pct", ascending=False).head(20).to_dict("records"))
 
 

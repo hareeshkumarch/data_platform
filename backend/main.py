@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from backend.api.middleware.rate_limit import rate_limit_middleware
 from backend.api.routes.advanced import advanced_router
+from backend.api.routes.cleaning import cleaning_router
 from backend.api.routes.conversations import conversations_router
 from backend.api.routes.endpoints import router
 from backend.api.routes.warehouse import warehouse_router
@@ -39,7 +40,11 @@ async def lifespan(app: FastAPI):
         version=settings.APP_VERSION,
         provider=settings.DEFAULT_LLM_PROVIDER,
     )
-    start_metrics_server()
+    if settings.ENABLE_PROMETHEUS:
+        try:
+            start_metrics_server()
+        except Exception as exc:  # pragma: no cover - port-in-use on hot reload
+            logger.warning("Prometheus metrics server failed to start", error=str(exc))
     try:
         SQLWarehouse.get().bootstrap()
     except (
@@ -57,12 +62,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_wildcard_cors = settings.ALLOWED_ORIGINS == ["*"] or "*" in settings.ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    # Browsers reject "*" with credentials=True — disable credentials when wildcard is used.
+    allow_credentials=not _wildcard_cors,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Response-Time-Ms"],
 )
 
 app.middleware("http")(rate_limit_middleware)
@@ -74,12 +82,16 @@ async def timing(request: Request, call_next):
     response = await call_next(request)
     ms = (time.perf_counter() - start) * 1000
     try:
+        # Use the matched route template (e.g. "/api/v1/query/{id}") instead of the raw
+        # URL so Prometheus label cardinality stays bounded.
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", None) or request.url.path
         metrics.http_requests.labels(
             method=request.method,
-            endpoint=request.url.path,
+            endpoint=endpoint,
             status=response.status_code,
         ).inc()
-        metrics.http_duration.labels(endpoint=request.url.path).observe(ms / 1000)
+        metrics.http_duration.labels(endpoint=endpoint).observe(ms / 1000)
     except Exception:  # pragma: no cover - metric collection must never break requests
         pass
     response.headers["X-Response-Time-Ms"] = str(round(ms, 2))
@@ -88,14 +100,26 @@ async def timing(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_error(request: Request, exc: Exception):
-    logger.error("Unhandled error", path=request.url.path, error=str(exc))
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    # Log the full error server-side but do NOT leak internals to the client.
+    logger.error(
+        "Unhandled error",
+        path=request.url.path,
+        error=str(exc),
+        error_type=type(exc).__name__,
+    )
+    detail = (
+        str(exc)
+        if settings.DEBUG
+        else "Internal server error. Check server logs for details."
+    )
+    return JSONResponse(status_code=500, content={"detail": detail})
 
 
 app.include_router(router, prefix=settings.API_PREFIX)
 app.include_router(warehouse_router, prefix=settings.API_PREFIX)
 app.include_router(conversations_router, prefix=settings.API_PREFIX)
 app.include_router(advanced_router, prefix=settings.API_PREFIX)
+app.include_router(cleaning_router, prefix=settings.API_PREFIX)
 register_websockets(app)
 
 

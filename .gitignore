@@ -97,34 +97,16 @@ __pycache__/
 
 # Python cache
 **/__pycache__/
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
+
+# Ruff cache
+.ruff_cache/
+
+# Backend logs
+backend_logs.txt
+
+# Test reports
+test_reports/
+
 # Environment and credential files
 .env
 .env.*

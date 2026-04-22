@@ -64,6 +64,10 @@ class _TaskRegistry:
 
 _REGISTRY = _TaskRegistry()
 
+# Keep strong references to in-flight asyncio tasks — otherwise the Python
+# garbage collector may cancel them mid-run (PEP 492 / asyncio docs).
+_INFLIGHT: set["asyncio.Task[Any]"] = set()
+
 
 class _AsyncTaskHandle:
     """Handle returned from ``apply_async`` — provides ``.id``."""
@@ -115,14 +119,16 @@ class _AsyncTask:
             rec.state = "STARTED"
             try:
                 result = await self._func(rec, **kwargs)
-                rec.state = "SUCCESS"
+                # Set progress *before* state so a poll that lands between the
+                # two writes never sees "SUCCESS" at <100%.
                 rec.progress = 100.0
                 rec.result = result
                 rec.finished_at = time.time()
+                rec.state = "SUCCESS"
             except Exception as exc:
-                rec.state = "FAILURE"
                 rec.error = f"{type(exc).__name__}: {exc}"
                 rec.finished_at = time.time()
+                rec.state = "FAILURE"
                 logger.error(
                     "task failed",
                     task=self.name,
@@ -134,7 +140,9 @@ class _AsyncTask:
         # Schedule on the running loop (or create one if called from a sync context).
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_runner())
+            task = loop.create_task(_runner())
+            _INFLIGHT.add(task)
+            task.add_done_callback(_INFLIGHT.discard)
         except RuntimeError:
             # fallback — used only in tests invoked synchronously
             asyncio.run(_runner())

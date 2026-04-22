@@ -20,9 +20,16 @@ import litellm
 
 from backend.config import settings
 from backend.models.schemas import LLMProvider, LLMRequest, LLMResponse
+from backend.services.circuit_breaker import CircuitBreaker
 from backend.utils.logger import get_logger, metrics
 
 logger = get_logger(__name__)
+
+_CIRCUIT_BREAKER = CircuitBreaker(
+    failure_threshold=3,
+    window_seconds=60.0,
+    cooldown_seconds=30.0,
+)
 
 
 # Model catalogue surfaced to the Settings page
@@ -102,6 +109,31 @@ class LLMStats:
 _GLOBAL_LLM_STATS = LLMStats()
 
 
+# Cap the response body we run through the slow JSON-salvage parser so a
+# misbehaving or adversarial provider can't pin a CPU with O(n²) scans.
+_MAX_JSON_CANDIDATE_BYTES = 64 * 1024
+
+
+def _coerce_provider(provider: Any) -> LLMProvider:
+    """Map a provider string to an LLMProvider enum without silently falling
+    through to GEMINI (which previously polluted metrics with wrong labels)."""
+    if isinstance(provider, LLMProvider):
+        return provider
+    if isinstance(provider, str):
+        key = provider.lower()
+        if key in LLMProvider._value2member_map_:
+            return LLMProvider(key)
+        for member in LLMProvider:
+            if member.value == key or member.name.lower() == key:
+                return member
+    logger.warning("Unknown LLM provider value", provider=str(provider))
+    # Fall back to the configured default rather than a hard-coded vendor.
+    default = settings.DEFAULT_LLM_PROVIDER.lower()
+    if default in LLMProvider._value2member_map_:
+        return LLMProvider(default)
+    return next(iter(LLMProvider))
+
+
 class LLMService:
     """Thin wrapper around litellm supporting multiple providers."""
 
@@ -123,7 +155,11 @@ class LLMService:
     # ---- public API --------------------------------------------------------
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
-        """Return a full completion, using cache when available."""
+        """Return a full completion, using cache when available.
+
+        Integrates circuit-breaker resilience: if the preferred provider is
+        tripped, auto-fallback to the next healthy configured provider.
+        """
         key = self._cache_key(request) if request.use_cache else None
         if key and self._cache:
             raw = await self._cache.get_json(key)
@@ -131,9 +167,7 @@ class LLMService:
                 metrics.llm_cache_hits.inc()
                 return LLMResponse(
                     content=raw["content"],
-                    provider=LLMProvider(raw["provider"])
-                    if raw["provider"] in LLMProvider._value2member_map_
-                    else LLMProvider.GEMINI,
+                    provider=_coerce_provider(raw["provider"]),
                     model=raw["model"],
                     tokens_in=raw.get("tokens_in", 0),
                     tokens_out=raw.get("tokens_out", 0),
@@ -141,41 +175,77 @@ class LLMService:
                     latency_ms=raw.get("latency_ms", 0.0),
                 )
 
-        provider, model = self._resolve(request)
-        start = time.perf_counter()
-        tokens_in, tokens_out = 0, 0
-        try:
-            async with self._sem:
-                resp = await self._call(request, provider, model)
-                content = resp.choices[0].message.content or ""
-                if hasattr(resp, "usage") and resp.usage:
-                    tokens_in = getattr(resp.usage, "prompt_tokens", 0)
-                    tokens_out = getattr(resp.usage, "completion_tokens", 0)
-            latency_ms = (time.perf_counter() - start) * 1000
-            self._stats.observe(tokens_in, tokens_out, latency_ms)
-            metrics.llm_calls.labels(
-                provider=provider, model=model, status="success"
-            ).inc()
-            metrics.llm_tokens.labels(provider=provider, model=model).inc(
-                tokens_in + tokens_out
-            )
-            metrics.llm_latency.labels(provider=provider).observe(latency_ms / 1000)
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - start) * 1000
-            self._stats.observe(0, 0, latency_ms, error=True)
-            metrics.llm_calls.labels(
-                provider=provider, model=model, status="error"
-            ).inc()
-            logger.error(
-                "LLM call failed", provider=provider, model=model, error=str(exc)
-            )
-            raise
+        preferred_provider, preferred_model = self._resolve(request)
+        providers = list(self._direct_keys.keys())
+        provider = preferred_provider
+        model = preferred_model
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(len(providers)):
+            if _CIRCUIT_BREAKER.is_open(provider):
+                fallback = _CIRCUIT_BREAKER.pick_fallback(
+                    provider, providers, self._direct_keys
+                )
+                if fallback == provider:
+                    # All breakers open; try anyway (degraded)
+                    pass
+                else:
+                    logger.warning(
+                        "Circuit breaker OPEN — falling back",
+                        from_provider=provider,
+                        to_provider=fallback,
+                    )
+                    provider = fallback
+                    model = self._default_model_for(provider)
+
+            start = time.perf_counter()
+            tokens_in, tokens_out = 0, 0
+            try:
+                async with self._sem:
+                    resp = await self._call(request, provider, model)
+                    content = resp.choices[0].message.content or ""
+                    if hasattr(resp, "usage") and resp.usage:
+                        tokens_in = getattr(resp.usage, "prompt_tokens", 0)
+                        tokens_out = getattr(resp.usage, "completion_tokens", 0)
+                latency_ms = (time.perf_counter() - start) * 1000
+                self._stats.observe(tokens_in, tokens_out, latency_ms)
+                metrics.llm_calls.labels(
+                    provider=provider, model=model, status="success"
+                ).inc()
+                metrics.llm_tokens.labels(provider=provider, model=model).inc(
+                    tokens_in + tokens_out
+                )
+                metrics.llm_latency.labels(provider=provider).observe(
+                    latency_ms / 1000
+                )
+                await _CIRCUIT_BREAKER.record_success(provider)
+                break  # success — exit retry loop
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start) * 1000
+                self._stats.observe(0, 0, latency_ms, error=True)
+                metrics.llm_calls.labels(
+                    provider=provider, model=model, status="error"
+                ).inc()
+                logger.error(
+                    "LLM call failed",
+                    provider=provider,
+                    model=model,
+                    error=str(exc),
+                )
+                await _CIRCUIT_BREAKER.record_failure(provider)
+                last_exc = exc
+                # Try next provider on next iteration
+                provider = _CIRCUIT_BREAKER.pick_fallback(
+                    provider, providers, self._direct_keys
+                )
+                model = self._default_model_for(provider)
+        else:
+            # All providers exhausted
+            raise last_exc or RuntimeError("All LLM providers failed.")
 
         response = LLMResponse(
             content=content,
-            provider=LLMProvider(provider)
-            if provider in LLMProvider._value2member_map_
-            else LLMProvider.GEMINI,
+            provider=_coerce_provider(provider),
             model=model,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
@@ -322,6 +392,13 @@ class LLMService:
             "success_rate": round(success_rate, 1),
         }
 
+    def get_circuit_status(self) -> Dict[str, Any]:
+        return _CIRCUIT_BREAKER.status()
+
+    @staticmethod
+    def _default_model_for(provider: str) -> str:
+        return DEFAULT_MODEL_BY_PROVIDER.get(provider, settings.DEFAULT_LLM_MODEL)
+
     # ---- internals ---------------------------------------------------------
 
     def _resolve(self, request: LLMRequest) -> tuple[str, str]:
@@ -389,6 +466,9 @@ class LLMService:
     def extract_json(text: str) -> Any:
         """Robust JSON extraction from a possibly fenced or mixed LLM response."""
         text = (text or "").strip()
+        # Cap input to prevent O(n²) scan on adversarially large responses.
+        if len(text) > _MAX_JSON_CANDIDATE_BYTES:
+            text = text[:_MAX_JSON_CANDIDATE_BYTES]
 
         # 1. Try to find a JSON-specific code block first
         json_fence = re.search(r"```(?:json)\s*([\s\S]+?)\s*```", text, re.IGNORECASE)
@@ -443,6 +523,8 @@ class LLMService:
     def extract_json_with_preamble(text: str) -> tuple[Any, str]:
         """Returns (parsed_data, preamble_text) from a response."""
         text = (text or "").strip()
+        if len(text) > _MAX_JSON_CANDIDATE_BYTES:
+            text = text[:_MAX_JSON_CANDIDATE_BYTES]
 
         # 1. Try strict JSON block first
         json_fence = re.search(r"```(?:json)\s*([\s\S]+?)\s*```", text, re.IGNORECASE)

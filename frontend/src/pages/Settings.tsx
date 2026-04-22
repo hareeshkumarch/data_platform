@@ -105,7 +105,7 @@ const Settings = () => {
     }
   };
 
-  const tokensInThousands = metrics?.stats.llm_tokens ? metrics.stats.llm_tokens / 1000 : 0;
+  const tokensInThousands = Number(metrics?.stats?.llm_tokens) || 0 ? (Number(metrics?.stats?.llm_tokens) || 0) / 1000 : 0;
 
   return (
     <AppShell title="Settings" subtitle="Configure providers, models and view usage" status={loading ? "processing" : "ready"}>
@@ -161,8 +161,8 @@ const Settings = () => {
               activeProvider={metrics?.llmMetrics?.active_provider ?? provider}
               activeModel={metrics?.llmMetrics?.active_model ?? model}
               calls={metrics?.llmMetrics?.calls_24h ?? 0}
-              tokens={metrics?.llmMetrics ? metrics.llmMetrics.tokens_in + metrics.llmMetrics.tokens_out : 0}
-              successRate={metrics?.llmMetrics?.success_rate ?? 100}
+              tokens={metrics?.llmMetrics ? (Number(metrics.llmMetrics.tokens_in) || 0) + (Number(metrics.llmMetrics.tokens_out) || 0) : 0}
+              successRate={typeof metrics?.llmMetrics?.success_rate === "number" ? metrics.llmMetrics.success_rate : parseFloat(String(metrics?.llmMetrics?.success_rate)) || 100}
               avgLatencyMs={metrics?.llmMetrics?.avg_latency_ms ?? 0}
             />
 
@@ -450,10 +450,10 @@ const ProviderCreditsBadge = ({
       </div>
 
       <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
-        <MiniStat label="Calls" value={calls.toLocaleString()} />
-        <MiniStat label="Tokens" value={tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : String(tokens)} />
-        <MiniStat label="Success" value={`${successRate.toFixed(1)}%`} tone={successRate >= 99 ? "good" : successRate >= 95 ? "warning" : "danger"} />
-        <MiniStat label="Avg latency" value={`${Math.round(avgLatencyMs)} ms`} />
+        <MiniStat label="Calls" value={Number.isFinite(calls) ? calls.toLocaleString() : "0"} />
+        <MiniStat label="Tokens" value={Number.isFinite(tokens) && tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : String(Number.isFinite(tokens) ? tokens : 0)} />
+        <MiniStat label="Success" value={`${Number.isFinite(successRate) ? successRate.toFixed(1) : "100.0"}%`} tone={Number.isFinite(successRate) && successRate >= 99 ? "good" : Number.isFinite(successRate) && successRate >= 95 ? "warning" : "danger"} />
+        <MiniStat label="Avg latency" value={`${Number.isFinite(avgLatencyMs) ? Math.round(avgLatencyMs) : 0} ms`} />
       </div>
 
       {keyMasked && (

@@ -5,6 +5,7 @@ import hashlib
 import json
 import multiprocessing
 import queue
+import time
 from typing import Any, Dict, List
 
 import numpy as np
@@ -46,6 +47,67 @@ from backend.utils.data_utils import (
 from backend.utils.logger import get_logger, metrics
 
 logger = get_logger(__name__)
+
+
+def _rehydrate_dataset(dataset_id: str):
+    """Rebuild (schema, sample_rows) from disk for a given dataset.
+
+    Returns ``None`` when the dataset's backing file is missing. This lets the
+    QueryAgent recover gracefully after an in-memory cache flush (backend
+    restart) without forcing users to re-upload files.
+    """
+    from backend.services.storage_service import StorageService  # local import to avoid cycle
+
+    storage = StorageService()
+    file_path = storage.get_file_path(dataset_id)
+    if not file_path or not file_path.exists():
+        return None
+
+    ext = file_path.suffix.lower()
+    if ext == ".csv":
+        df = pd.read_csv(file_path)
+    elif ext == ".json":
+        df = pd.read_json(file_path)
+    elif ext in (".xlsx", ".xls"):
+        df = pd.read_excel(file_path)
+    elif ext == ".parquet":
+        df = pd.read_parquet(file_path)
+    else:
+        df = pd.read_csv(file_path)
+
+    cols: List[Dict[str, Any]] = []
+    for c in df.columns:
+        dtype = str(df[c].dtype)
+        if "int" in dtype or "float" in dtype:
+            inferred = "numeric"
+        elif "datetime" in dtype:
+            inferred = "datetime"
+        elif "bool" in dtype:
+            inferred = "boolean"
+        else:
+            inferred = "categorical"
+        cols.append(
+            {
+                "name": c,
+                "dtype": dtype,
+                "inferred_type": inferred,
+                "null_pct": round(float(df[c].isnull().mean() * 100), 2),
+                "unique_count": int(df[c].nunique()),
+            }
+        )
+
+    record = storage.get_dataset_record(dataset_id) or {}
+    schema = {
+        "dataset_id": dataset_id,
+        "name": record.get("filename", file_path.name),
+        "row_count": int(len(df)),
+        "col_count": int(len(df.columns)),
+        "columns": cols,
+    }
+    # Use a larger sample than the in-HTTP-path rehydrator so QueryAgent results
+    # are meaningful (200 rows makes aggregate answers wildly wrong).
+    sample = df.head(5000).to_dict("records")
+    return schema, sample
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -646,30 +708,81 @@ class InsightAgent(BaseAgent):
 # QUERY AGENT
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Pandas/NumPy helpers that touch the filesystem, network, or the interpreter.
+# Generated code may not reference any of these — even indirectly via attribute
+# access — because the sandbox injects the real ``pd``/``np`` modules.
+_FORBIDDEN_NAMES = {
+    "eval", "exec", "open", "compile", "input",
+    "getattr", "setattr", "delattr", "hasattr", "vars", "globals", "locals",
+    "__import__", "breakpoint", "help",
+}
+_FORBIDDEN_ATTRS = {
+    # File/network I/O exposed by pandas
+    "read_csv", "read_json", "read_parquet", "read_excel", "read_sql",
+    "read_sql_query", "read_sql_table", "read_html", "read_hdf", "read_feather",
+    "read_pickle", "read_orc", "read_xml", "read_clipboard", "read_fwf",
+    "read_gbq", "read_sas", "read_spss", "read_stata", "read_table",
+    "to_csv", "to_json", "to_parquet", "to_excel", "to_sql", "to_hdf",
+    "to_feather", "to_pickle", "to_orc", "to_xml", "to_clipboard", "to_gbq",
+    "to_stata", "to_html", "to_markdown", "to_latex",
+    # NumPy file I/O
+    "save", "savez", "savez_compressed", "load", "loadtxt", "savetxt",
+    "fromfile", "tofile", "memmap",
+    # Interpreter / module internals
+    "__class__", "__subclasses__", "__bases__", "__mro__", "__globals__",
+    "__builtins__", "__dict__", "__import__", "__getattribute__",
+    "__reduce__", "__reduce_ex__", "__init_subclass__",
+}
+
+
+def _validate_code_ast(code_str: str) -> None:
+    """Raise ValueError if the generated code uses forbidden constructs."""
+    tree = ast.parse(code_str)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            raise ValueError("Import statements are strictly forbidden.")
+        if isinstance(node, ast.Call):
+            func = node.func
+            # Direct name call, e.g. open(...)
+            if isinstance(func, ast.Name) and func.id in _FORBIDDEN_NAMES:
+                raise ValueError(f"Forbidden function call: {func.id}")
+            # Attribute call, e.g. pd.read_csv(...)
+            if isinstance(func, ast.Attribute) and func.attr in _FORBIDDEN_ATTRS:
+                raise ValueError(f"Forbidden attribute call: {func.attr}")
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("__") or node.attr in _FORBIDDEN_ATTRS:
+                raise ValueError(f"Access to attribute '{node.attr}' is forbidden.")
+
+
 def _secure_runner(code_str: str, input_df: pd.DataFrame, out_queue: multiprocessing.Queue):
     try:
         # 1. Strict AST validation
-        tree = ast.parse(code_str)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                raise ValueError("Import statements are strictly forbidden.")
-            if isinstance(node, ast.Call):
-                if getattr(node.func, "id", "") in ["eval", "exec", "open", "getattr", "setattr", "__import__"]:
-                    raise ValueError(f"Forbidden function call: {getattr(node.func, 'id', '')}")
-            if isinstance(node, ast.Attribute):
-                if node.attr.startswith("__"):
-                    raise ValueError("Access to dunder attributes is forbidden.")
-        
-        # 2. Execution in isolated namespace
+        _validate_code_ast(code_str)
+
+        # 2. Execute in a heavily restricted namespace. We expose only the
+        # builtins strictly required to evaluate common Pandas expressions so
+        # that even a successful validation cannot fall back to ``open``/``eval``
+        # via a rebuilt global dictionary.
+        safe_builtins = {
+            "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
+            "divmod": divmod, "enumerate": enumerate, "filter": filter,
+            "float": float, "frozenset": frozenset, "int": int, "isinstance": isinstance,
+            "issubclass": issubclass, "iter": iter, "len": len, "list": list,
+            "map": map, "max": max, "min": min, "next": next, "object": object,
+            "pow": pow, "range": range, "reversed": reversed, "round": round,
+            "set": set, "slice": slice, "sorted": sorted, "str": str, "sum": sum,
+            "tuple": tuple, "type": type, "zip": zip, "True": True, "False": False,
+            "None": None,
+        }
         ns = {"df": input_df.copy(), "pd": pd, "np": np, "result_df": None}
-        exec(code_str, {"__builtins__": {}}, ns)
-        
+        exec(code_str, {"__builtins__": safe_builtins}, ns)
+
         rdf = ns.get("result_df")
         if rdf is None:
             rdf = ns.get("df", pd.DataFrame())
         out_queue.put({"status": "success", "data": rdf})
     except Exception as ex:
-        out_queue.put({"status": "error", "error": str(ex)})
+        out_queue.put({"status": "error", "error": f"{type(ex).__name__}: {ex}"})
 
 
 
@@ -685,8 +798,11 @@ class QueryAgent(BaseAgent):
         question = payload["question"]
         use_cache = payload.get("use_cache", True)
 
+        # Keep the session identifier in the cache key so follow-up questions
+        # don't collide with one-off queries in the cache namespace.
+        session_id_for_key = payload.get("session_id") or f"session_{dataset_id}"
         cache_key = hashlib.sha256(
-            f"{dataset_id}:{question.strip().lower()}".encode()
+            f"{dataset_id}:{session_id_for_key}:{question.strip().lower()}".encode()
         ).hexdigest()
         if use_cache:
             cached = await self._cache.get_query(cache_key)
@@ -696,7 +812,27 @@ class QueryAgent(BaseAgent):
         schema = await self._cache.get_schema(dataset_id)
         rows = await self._cache.get_sample(dataset_id)
         if not schema or not rows:
-            raise ValueError(f"Dataset {dataset_id} not loaded.")
+            # Attempt to rehydrate from disk via the storage service. This keeps
+            # queries working after a backend restart (the in-memory cache is
+            # empty but the uploaded file and dataset registry row persist).
+            try:
+                rehydrated = await asyncio.to_thread(
+                    _rehydrate_dataset, dataset_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "dataset rehydrate failed",
+                    dataset_id=dataset_id,
+                    error=str(exc),
+                )
+                rehydrated = None
+            if rehydrated is None:
+                raise ValueError(
+                    f"Dataset {dataset_id} not loaded. Re-upload the file or re-run ingestion."
+                )
+            schema, rows = rehydrated
+            await self._cache.set_schema(dataset_id, schema)
+            await self._cache.set_sample(dataset_id, rows)
 
         rag_context = await self._vector.retrieve(dataset_id, question)
 
@@ -861,29 +997,61 @@ class QueryAgent(BaseAgent):
             "suggested_chart": plan.get("suggested_chart", "table"),
             "cached": False,
         }
-        await self._cache.set_query(cache_key, result)
+        await self._cache.set_query(cache_key, result, dataset_id=dataset_id)
+        # Store in session memory for multi-turn context
+        memory_key = f"memory:{session_id}"
+        memory = await self._cache.get_json(memory_key) or []
+        memory.append({
+            "question": question,
+            "explanation": explanation,
+            "generated_code": plan.get("generated_code", ""),
+            "query_type": plan.get("query_type", "pandas"),
+            "timestamp": time.time(),
+        })
+        # Keep last 10 turns to avoid unbounded growth
+        memory = memory[-10:]
+        await self._cache.set_json(memory_key, memory, ttl=3600)
         return result
 
     def _exec_code(self, code: str, df: pd.DataFrame) -> Dict[str, Any]:
-        # Use multiprocessing for true isolation and timeout enforcement
-        ctx = multiprocessing.get_context('spawn')
-        q = ctx.Queue()
-        p = ctx.Process(target=_secure_runner, args=(code, df, q))
-        p.start()
-        
+        # Fast-fail on forbidden syntax in the parent process so we don't pay
+        # the spawn cost just to reject the code.
         try:
-            result = q.get(timeout=5.0)  # 5 second strict timeout
-            p.join(timeout=1.0)
+            _validate_code_ast(code)
+        except Exception as exc:
+            return {"columns": [], "rows": [], "row_count": 0, "error": str(exc)}
+
+        # Use multiprocessing for true isolation and timeout enforcement. Spawn
+        # is required on Windows and avoids inheriting file descriptors.
+        ctx = multiprocessing.get_context("spawn")
+        q = ctx.Queue()
+        p = ctx.Process(target=_secure_runner, args=(code, df, q), daemon=True)
+        p.start()
+
+        def _kill() -> None:
+            if p.is_alive():
+                try:
+                    p.terminate()
+                    p.join(timeout=2.0)
+                    if p.is_alive():  # pragma: no cover - last resort
+                        p.kill()
+                        p.join(timeout=1.0)
+                except Exception:
+                    pass
+
+        try:
+            result = q.get(timeout=10.0)  # hard wall-clock timeout
+            p.join(timeout=2.0)
+            _kill()
             if result.get("status") == "error":
                 return {"columns": [], "rows": [], "row_count": 0, "error": result.get("error")}
             rdf = result.get("data")
         except queue.Empty:
-            p.terminate()
-            p.join()
-            return {"columns": [], "rows": [], "row_count": 0, "error": "Execution Timeout (5s exceeded)."}
+            _kill()
+            return {"columns": [], "rows": [], "row_count": 0, "error": "Execution timeout (10s exceeded)."}
         except Exception as e:
-            p.terminate()
-            return {"columns": [], "rows": [], "row_count": 0, "error": str(e)}
+            _kill()
+            return {"columns": [], "rows": [], "row_count": 0, "error": f"{type(e).__name__}: {e}"}
         
         if rdf is None:
             rdf = pd.DataFrame()

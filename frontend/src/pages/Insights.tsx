@@ -155,7 +155,13 @@ const Insights = () => {
     enabled: !!activeTargetId && !!anomalyCol && tab === "anomalies",
   });
 
-  const loading = !dbResp || (!!activeTargetId && (loadingPreview || loadingProfile));
+  const { isError: datasetsError } = useQuery({
+    queryKey: ["datasets"],
+    queryFn: () => apiFetch<ApiResponse<Dataset>>("/datasets"),
+  });
+  // Only show loading while the dataset list is genuinely in flight — not
+  // stuck forever if ``/datasets`` errors.
+  const loading = (!dbResp && !datasetsError) || (!!activeTargetId && (loadingPreview || loadingProfile));
   const advancedLoading = loadingForecast || loadingAnomalies || loadingCorr || loadingTrends || loadingOutliers;
 
   const { data: distResp, isLoading: loadingDist, isError: errorDist } = useQuery({
@@ -367,7 +373,7 @@ const Overview = ({ findings, mainDataset, loading }: { findings: Finding[]; mai
               <g.icon className="h-3 w-3 text-muted-foreground" />
               <span className="text-xs text-muted-foreground">{g.label}</span>
               <span className="text-xs font-semibold tabular-nums text-foreground">{g.count}</span>
-              <span className="text-[10px] text-muted-foreground">({((g.count / colCount) * 100).toFixed(0)}%)</span>
+              <span className="text-[10px] text-muted-foreground">({(colCount > 0 ? (g.count / colCount) * 100 : 0).toFixed(0)}%)</span>
             </div>
           ))}
         </div>
@@ -395,12 +401,13 @@ const Overview = ({ findings, mainDataset, loading }: { findings: Finding[]; mai
           <p className="text-[11px] text-muted-foreground mb-4">Range bar with mean (μ) marker · CV = coefficient of variation</p>
           <div className="space-y-3">
             {numericCols.map(col => {
-              const min = Number(col.min_val ?? 0);
-              const max = Number(col.max_val ?? 0);
-              const mean = Number(col.mean_val ?? 0);
+              const _n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
+              const min = _n(col.min_val);
+              const max = _n(col.max_val);
+              const mean = _n(col.mean_val);
               const range = max - min || 1;
               const meanPct = Math.max(0, Math.min(100, ((mean - min) / range) * 100));
-              const stdVal = Number(col.std_val ?? 0);
+              const stdVal = _n(col.std_val);
               const cv = mean !== 0 ? Math.abs(stdVal / mean) * 100 : 0;
 
               return (
@@ -565,10 +572,10 @@ const ColumnProfile = ({ col, rowCount, index }: { col: DatasetColumn; rowCount:
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
             {col.inferred_type === "numeric" && (
               <>
-                <MiniStat label="Min" value={col.min_val != null ? Number(col.min_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
-                <MiniStat label="Max" value={col.max_val != null ? Number(col.max_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
-                <MiniStat label="Mean" value={col.mean_val != null ? Number(col.mean_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
-                <MiniStat label="Std Dev" value={col.std_val != null ? Number(col.std_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
+                <MiniStat label="Min" value={col.min_val != null && Number.isFinite(Number(col.min_val)) ? Number(col.min_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
+                <MiniStat label="Max" value={col.max_val != null && Number.isFinite(Number(col.max_val)) ? Number(col.max_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
+                <MiniStat label="Mean" value={col.mean_val != null && Number.isFinite(Number(col.mean_val)) ? Number(col.mean_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
+                <MiniStat label="Std Dev" value={col.std_val != null && Number.isFinite(Number(col.std_val)) ? Number(col.std_val).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"} />
               </>
             )}
             {col.inferred_type === "datetime" && (
@@ -616,10 +623,15 @@ const MiniStat = ({ label, value }: { label: string; value: string }) => (
 
 const CorrelationsPanel = ({ data }: { data: Correlations | null }) => {
   const heatmap = useMemo(() => {
-    if (!data || !data.matrix.length) return null;
+    if (!data || !Array.isArray(data.matrix) || data.matrix.length === 0 || !Array.isArray(data.columns)) {
+      return null;
+    }
     return data.columns.map((col, i) => ({
       col,
-      cells: data.columns.map((c2, j) => ({ col: c2, value: data.matrix[i][j] ?? 0 })),
+      cells: (data.columns ?? []).map((c2, j) => ({
+        col: c2,
+        value: Array.isArray(data.matrix[i]) ? (data.matrix[i][j] ?? 0) : 0,
+      })),
     }));
   }, [data]);
 
@@ -644,20 +656,23 @@ const CorrelationsPanel = ({ data }: { data: Correlations | null }) => {
             {heatmap.map((row) => (
               <tr key={row.col}>
                 <th className="sticky left-0 bg-card px-2 py-1 text-left text-foreground font-medium whitespace-nowrap">{row.col}</th>
-                {row.cells.map((cell) => (
-                  <td key={cell.col} className="px-0.5 py-0.5">
-                    <div
-                      title={`${row.col} ↔ ${cell.col}: ${cell.value.toFixed(3)}`}
-                      className="h-8 w-12 rounded-sm flex items-center justify-center text-[10px] font-semibold tabular-nums"
-                      style={{
-                        background: correlationColor(cell.value),
-                        color: Math.abs(cell.value) > 0.5 ? "white" : "inherit",
-                      }}
-                    >
-                      {cell.value.toFixed(2)}
-                    </div>
-                  </td>
-                ))}
+                {row.cells.map((cell) => {
+                  const v = typeof cell.value === "number" && Number.isFinite(cell.value) ? cell.value : 0;
+                  return (
+                    <td key={cell.col} className="px-0.5 py-0.5">
+                      <div
+                        title={`${row.col} ↔ ${cell.col}: ${v.toFixed(3)}`}
+                        className="h-8 w-12 rounded-sm flex items-center justify-center text-[10px] font-semibold tabular-nums"
+                        style={{
+                          background: correlationColor(v),
+                          color: Math.abs(v) > 0.5 ? "white" : "inherit",
+                        }}
+                      >
+                        {v.toFixed(2)}
+                      </div>
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -678,8 +693,8 @@ const CorrelationsPanel = ({ data }: { data: Correlations | null }) => {
                   )}>
                     {p.strength}
                   </span>
-                  <span className="text-sm font-semibold tabular-nums" style={{ color: correlationTextColor(p.pearson_r) }}>
-                    {p.pearson_r >= 0 ? "+" : ""}{p.pearson_r.toFixed(3)}
+                  <span className="text-sm font-semibold tabular-nums" style={{ color: correlationTextColor(typeof p.pearson_r === "number" && Number.isFinite(p.pearson_r) ? p.pearson_r : 0) }}>
+                    {typeof p.pearson_r === "number" && Number.isFinite(p.pearson_r) ? `${p.pearson_r >= 0 ? "+" : ""}${p.pearson_r.toFixed(3)}` : "—"}
                   </span>
                 </div>
               </li>
@@ -692,58 +707,73 @@ const CorrelationsPanel = ({ data }: { data: Correlations | null }) => {
 };
 
 const TrendsPanel = ({ trends, dataset }: { trends: Trend[]; dataset: DatasetPreview | null }) => {
-  if (!trends.length) {
+  const safeTrends = Array.isArray(trends) ? trends : [];
+  if (!safeTrends.length) {
     return <EmptyState icon={TrendingUp} title="No time-series trends available" subtitle="Trends require a date/time column and at least one numeric column." />;
   }
+  const num = (v: unknown, fallback = 0): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
   return (
     <div className="space-y-3">
-      {trends.map((t) => (
-        <div key={t.value_column} className="card-soft p-5">
-          <div className="flex items-center justify-between gap-3 mb-2">
-            <div>
-              <h3 className="text-sm font-semibold text-foreground">{t.value_column}</h3>
-              <p className="text-[11px] text-muted-foreground">{t.data_points} points · {dataset?.name ?? ""}</p>
+      {safeTrends.map((t, i) => {
+        const pct = num(t?.pct_change_total);
+        const r2 = num(t?.r_squared);
+        return (
+          <div key={t?.value_column ?? i} className="card-soft p-5">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div>
+                <h3 className="text-sm font-semibold text-foreground">{t?.value_column ?? "—"}</h3>
+                <p className="text-[11px] text-muted-foreground">{num(t?.data_points)} points · {dataset?.name ?? ""}</p>
+              </div>
+              <div className="text-right">
+                <span className={cn(
+                  "text-xs px-2 py-0.5 rounded-full font-semibold",
+                  t?.direction === "upward" ? "bg-success/10 text-success" : t?.direction === "downward" ? "bg-destructive/10 text-destructive" : "bg-surface text-muted-foreground",
+                )}>{t?.direction ?? "flat"} · {t?.strength ?? "—"}</span>
+                <p className="text-lg font-semibold tabular-nums mt-1">{pct >= 0 ? "+" : ""}{pct.toFixed(1)}%</p>
+              </div>
             </div>
-            <div className="text-right">
-              <span className={cn(
-                "text-xs px-2 py-0.5 rounded-full font-semibold",
-                t.direction === "upward" ? "bg-success/10 text-success" : t.direction === "downward" ? "bg-destructive/10 text-destructive" : "bg-surface text-muted-foreground",
-              )}>{t.direction} · {t.strength}</span>
-              <p className="text-lg font-semibold tabular-nums mt-1">{t.pct_change_total >= 0 ? "+" : ""}{t.pct_change_total.toFixed(1)}%</p>
+            <div className="flex items-center gap-3 text-[11px] text-muted-foreground font-mono">
+              <span>R² {r2.toFixed(3)}</span>
+              <span>·</span>
+              <span>{t?.significant ? "statistically significant" : "not significant"}</span>
             </div>
           </div>
-          <div className="flex items-center gap-3 text-[11px] text-muted-foreground font-mono">
-            <span>R² {t.r_squared.toFixed(3)}</span>
-            <span>·</span>
-            <span>{t.significant ? "statistically significant" : "not significant"}</span>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 };
 
 const OutliersPanel = ({ outliers }: { outliers: Outlier[] }) => {
-  if (!outliers.length) {
+  const safe = Array.isArray(outliers) ? outliers : [];
+  if (!safe.length) {
     return <EmptyState icon={AlertTriangle} title="No outliers detected" subtitle="Numeric columns look within expected bounds." />;
   }
+  const num = (v: unknown, fallback = 0): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-      {outliers.map((o) => (
-        <div key={o.column} className="card-soft p-5">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">{o.column}</h3>
-            <span className={cn(
-              "text-[11px] px-2 py-0.5 rounded-full font-mono",
-              o.outlier_pct > 5 ? "bg-destructive/10 text-destructive" : "bg-surface text-muted-foreground",
-            )}>{o.outlier_pct.toFixed(1)}%</span>
+      {safe.map((o, i) => {
+        const pct = num(o?.outlier_pct);
+        const lo = num(o?.lower_fence);
+        const hi = num(o?.upper_fence);
+        return (
+          <div key={o?.column ?? i} className="card-soft p-5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold">{o?.column ?? "—"}</h3>
+              <span className={cn(
+                "text-[11px] px-2 py-0.5 rounded-full font-mono",
+                pct > 5 ? "bg-destructive/10 text-destructive" : "bg-surface text-muted-foreground",
+              )}>{pct.toFixed(1)}%</span>
+            </div>
+            <p className="text-2xl font-semibold tabular-nums mt-1">{num(o?.outlier_count)}</p>
+            <p className="text-[11px] text-muted-foreground mt-1 font-mono">
+              IQR fences: {lo.toFixed(2)} → {hi.toFixed(2)}
+            </p>
           </div>
-          <p className="text-2xl font-semibold tabular-nums mt-1">{o.outlier_count}</p>
-          <p className="text-[11px] text-muted-foreground mt-1 font-mono">
-            IQR fences: {o.lower_fence?.toFixed(2)} → {o.upper_fence?.toFixed(2)}
-          </p>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 };
@@ -767,14 +797,17 @@ const ForecastPanel = ({
 }) => {
   const chartData = useMemo(() => {
     if (!data) return [];
-    const history = data.history.map((p) => ({ date: p.date, history: p.value }));
-    const smoothed = data.smoothed.map((p) => ({ date: p.date, smoothed: p.value }));
-    const forecast = data.forecast.map((p) => ({ date: p.date, forecast: p.value }));
+    const h = Array.isArray(data.history) ? data.history : [];
+    const s = Array.isArray(data.smoothed) ? data.smoothed : [];
+    const f = Array.isArray(data.forecast) ? data.forecast : [];
+    const history = h.map((p: any) => ({ date: p?.date, history: typeof p?.value === "number" ? p.value : 0 })).filter((p) => p.date);
+    const smoothed = s.map((p: any) => ({ date: p?.date, smoothed: typeof p?.value === "number" ? p.value : 0 })).filter((p) => p.date);
+    const forecast = f.map((p: any) => ({ date: p?.date, forecast: typeof p?.value === "number" ? p.value : 0 })).filter((p) => p.date);
     const merged = new Map<string, Record<string, unknown>>();
     for (const rows of [history, smoothed, forecast]) {
       for (const row of rows) {
-        const existing = (merged.get(row.date) ?? { date: row.date }) as Record<string, unknown>;
-        merged.set(row.date, { ...existing, ...row });
+        const existing = (merged.get(row.date as string) ?? { date: row.date }) as Record<string, unknown>;
+        merged.set(row.date as string, { ...existing, ...row });
       }
     }
     return Array.from(merged.values());
@@ -784,9 +817,9 @@ const ForecastPanel = ({
     return <EmptyState icon={LineChart} title="No numeric columns" subtitle="Forecasting needs at least one numeric + one date column." />;
   }
 
-  const slopeLabel = data
-    ? `${data.slope > 0 ? "+" : ""}${data.slope.toFixed(3)} per period`
-    : "";
+  const slope = typeof data?.slope === "number" && Number.isFinite(data.slope) ? data.slope : 0;
+  const intercept = typeof data?.intercept === "number" && Number.isFinite(data.intercept) ? data.intercept : 0;
+  const slopeLabel = data ? `${slope > 0 ? "+" : ""}${slope.toFixed(3)} per period` : "";
 
   return (
     <div className="space-y-4">
@@ -827,9 +860,9 @@ const ForecastPanel = ({
             <div className="flex items-center gap-3 text-[11px] text-muted-foreground font-mono">
               <span>slope {slopeLabel}</span>
               <span>·</span>
-              <span>intercept {data.intercept.toFixed(2)}</span>
+              <span>intercept {intercept.toFixed(2)}</span>
               <span>·</span>
-              <span>{data.history.length} history points · {data.forecast.length} future</span>
+              <span>{(Array.isArray(data.history) ? data.history.length : 0)} history points · {(Array.isArray(data.forecast) ? data.forecast.length : 0)} future</span>
             </div>
           </div>
         )}
@@ -896,12 +929,12 @@ const AnomalyPanel = ({
         {data && (
           <div className="space-y-3">
             <div className="grid grid-cols-3 gap-3">
-              <StatBlock label="Count" value={data.count.toString()} />
-              <StatBlock label="Rate" value={`${data.rate_pct.toFixed(2)}%`} />
-              <StatBlock label="Threshold" value={`|z| > ${data.threshold.toFixed(1)}`} />
+              <StatBlock label="Count" value={String(typeof data.count === "number" ? data.count : 0)} />
+              <StatBlock label="Rate" value={`${typeof data.rate_pct === "number" && Number.isFinite(data.rate_pct) ? data.rate_pct.toFixed(2) : "0.00"}%`} />
+              <StatBlock label="Threshold" value={`|z| > ${typeof data.threshold === "number" ? data.threshold.toFixed(1) : "3.0"}`} />
             </div>
 
-            {data.anomalies.length > 0 ? (
+            {Array.isArray(data.anomalies) && data.anomalies.length > 0 ? (
               <div className="overflow-x-auto max-h-[320px] rounded-lg border border-border">
                 <table className="w-full text-sm">
                   <thead className="bg-surface sticky top-0">
@@ -912,18 +945,23 @@ const AnomalyPanel = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {data.anomalies.slice(0, 40).map((p) => (
-                      <tr key={p.index} className="border-t border-border/60">
-                        <td className="px-4 py-2 text-xs font-mono text-muted-foreground">#{p.index}</td>
-                        <td className="px-4 py-2 text-right text-sm tabular-nums">{p.value.toLocaleString()}</td>
-                        <td className={cn(
-                          "px-4 py-2 text-right text-sm tabular-nums font-semibold",
-                          Math.abs(p.z_score) > data.threshold * 1.3 ? "text-destructive" : "text-warning",
-                        )}>
-                          {p.z_score >= 0 ? "+" : ""}{p.z_score.toFixed(3)}
-                        </td>
-                      </tr>
-                    ))}
+                    {data.anomalies.slice(0, 40).map((p, i) => {
+                      const value = typeof p?.value === "number" && Number.isFinite(p.value) ? p.value : 0;
+                      const z = typeof p?.z_score === "number" && Number.isFinite(p.z_score) ? p.z_score : 0;
+                      const thr = typeof data.threshold === "number" ? data.threshold : 3;
+                      return (
+                        <tr key={p?.index ?? i} className="border-t border-border/60">
+                          <td className="px-4 py-2 text-xs font-mono text-muted-foreground">#{p?.index ?? i}</td>
+                          <td className="px-4 py-2 text-right text-sm tabular-nums">{value.toLocaleString()}</td>
+                          <td className={cn(
+                            "px-4 py-2 text-right text-sm tabular-nums font-semibold",
+                            Math.abs(z) > thr * 1.3 ? "text-destructive" : "text-warning",
+                          )}>
+                            {z >= 0 ? "+" : ""}{z.toFixed(3)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -954,14 +992,17 @@ const StatBlock = ({ label, value }: { label: string; value: string }) => (
 /* ---------- NEW: Quality Panel ---------- */
 
 const QualityPanel = ({ data, loading, error }: { data: any | null; loading: boolean; error: boolean }) => {
-  if (error) return <EmptyState icon={Gauge} title="Unable to load quality analysis" subtitle="The backend server may need to be restarted with the latest code. Rebuild & restart Docker containers." />;
+  if (error) return <EmptyState icon={Gauge} title="Unable to load quality analysis" subtitle="Try re-running analysis after the dataset finishes ingesting." />;
   if (loading || !data) return <div className="space-y-3"><SkeletonChart /><div className="grid grid-cols-4 gap-3">{[1,2,3,4].map(i => <div key={i} className="h-20 rounded-lg bg-surface animate-pulse" />)}</div></div>;
 
+  const num = (v: unknown, fallback = 0): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+
   const factors = [
-    { label: "Completeness", value: data.completeness, color: "bg-blue-500" },
-    { label: "Uniqueness", value: data.uniqueness, color: "bg-violet-500" },
-    { label: "Consistency", value: data.consistency, color: "bg-emerald-500" },
-    { label: "Validity", value: data.validity, color: "bg-amber-500" },
+    { label: "Completeness", value: num(data.completeness), color: "bg-blue-500" },
+    { label: "Uniqueness", value: num(data.uniqueness), color: "bg-violet-500" },
+    { label: "Consistency", value: num(data.consistency), color: "bg-emerald-500" },
+    { label: "Validity", value: num(data.validity), color: "bg-amber-500" },
   ];
   const gradeColor: Record<string, string> = { A: "text-success", B: "text-blue-500", C: "text-warning", D: "text-orange-500", F: "text-destructive" };
 
@@ -971,10 +1012,10 @@ const QualityPanel = ({ data, loading, error }: { data: any | null; loading: boo
       <div className="card-soft p-6 text-center animate-fade-in-up">
         <p className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground font-semibold mb-2">Overall Data Quality</p>
         <div className="flex items-center justify-center gap-4">
-          <span className={cn("text-6xl font-bold tabular-nums", gradeColor[data.grade] || "text-foreground")}>{data.grade}</span>
+          <span className={cn("text-6xl font-bold tabular-nums", gradeColor[data.grade] || "text-foreground")}>{data.grade ?? "—"}</span>
           <div className="text-left">
-            <p className="text-3xl font-semibold tabular-nums text-foreground">{data.overall_score}<span className="text-base text-muted-foreground">/100</span></p>
-            <p className="text-xs text-muted-foreground mt-0.5">{data.missing_cells.toLocaleString()} missing · {data.duplicate_rows} duplicates</p>
+            <p className="text-3xl font-semibold tabular-nums text-foreground">{num(data.overall_score)}<span className="text-base text-muted-foreground">/100</span></p>
+            <p className="text-xs text-muted-foreground mt-0.5">{num(data.missing_cells).toLocaleString()} missing · {num(data.duplicate_rows)} duplicates</p>
           </div>
         </div>
       </div>
@@ -988,7 +1029,7 @@ const QualityPanel = ({ data, loading, error }: { data: any | null; loading: boo
               <span className="text-sm font-semibold tabular-nums">{f.value.toFixed(1)}%</span>
             </div>
             <div className="h-2 rounded-full bg-border overflow-hidden">
-              <div className={cn("h-full rounded-full transition-all duration-700", f.color)} style={{ width: `${f.value}%` }} />
+              <div className={cn("h-full rounded-full transition-all duration-700", f.color)} style={{ width: `${Math.min(100, Math.max(0, f.value))}%` }} />
             </div>
           </div>
         ))}
@@ -1004,10 +1045,10 @@ const QualityPanel = ({ data, loading, error }: { data: any | null; loading: boo
             {data.suggestions.map((s: any, i: number) => (
               <div key={i} className="flex items-center gap-3 p-2.5 rounded-lg bg-surface/50 border border-border/60">
                 <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono uppercase",
-                  s.action.includes("drop") ? "bg-destructive/10 text-destructive" : "bg-accent/10 text-accent"
-                )}>{s.action}</span>
-                <span className="text-xs text-foreground flex-1">{s.reason}</span>
-                {s.column !== "_rows_" && <span className="text-[10px] text-muted-foreground font-mono">{s.column}</span>}
+                  String(s.action ?? "").includes("drop") ? "bg-destructive/10 text-destructive" : "bg-accent/10 text-accent"
+                )}>{s.action ?? "fix"}</span>
+                <span className="text-xs text-foreground flex-1">{s.reason ?? ""}</span>
+                {s.column && s.column !== "_rows_" && <span className="text-[10px] text-muted-foreground font-mono">{s.column}</span>}
               </div>
             ))}
           </div>
@@ -1024,44 +1065,58 @@ const DistributionsPanel = ({ data, loading, error }: { data: any | null; loadin
   if (loading) return <div className="space-y-4">{[1,2,3].map(i => <div key={i} className="card-soft p-5"><div className="h-6 w-40 bg-surface animate-pulse rounded mb-3" /><div className="h-20 bg-surface animate-pulse rounded" /></div>)}</div>;
   if (!data?.distributions?.length) return <EmptyState icon={BarChart2} title="No distributions available" subtitle="Upload a dataset with numeric columns to see statistical distributions." />;
 
+  // Helpers that shield the render against partial / NaN responses.
+  const num = (v: unknown, fallback = 0): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  const fmt = (v: unknown, digits = 1): string => num(v).toLocaleString(undefined, { maximumFractionDigits: digits });
+
   return (
     <div className="space-y-4">
       {data.distributions.map((dist: any, idx: number) => {
-        const maxCount = Math.max(...dist.bins.map((b: any) => b.count));
+        const bins = Array.isArray(dist?.bins) ? dist.bins : [];
+        const counts = bins.map((b: any) => num(b?.count));
+        const maxCount = counts.length ? Math.max(...counts) : 0;
         return (
-          <div key={dist.column} className="card-soft p-5 animate-fade-in-up" style={{ animationDelay: `${idx * 80}ms` }}>
+          <div key={dist.column ?? idx} className="card-soft p-5 animate-fade-in-up" style={{ animationDelay: `${idx * 80}ms` }}>
             <div className="flex items-center justify-between mb-3">
               <div>
-                <h3 className="text-sm font-semibold text-foreground">{dist.column}</h3>
-                <p className="text-[11px] text-muted-foreground">{dist.n.toLocaleString()} values · μ={dist.mean.toLocaleString()} · σ={dist.std.toLocaleString()}</p>
+                <h3 className="text-sm font-semibold text-foreground">{dist.column ?? "—"}</h3>
+                <p className="text-[11px] text-muted-foreground">{fmt(dist.n, 0)} values · μ={fmt(dist.mean, 2)} · σ={fmt(dist.std, 2)}</p>
               </div>
               <div className="flex items-center gap-2">
                 <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono",
                   dist.is_normal ? "bg-success/10 text-success" : "bg-warning/10 text-warning"
                 )}>{dist.is_normal ? "Normal ✓" : "Non-normal"}</span>
-                <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono bg-surface text-muted-foreground")}>{dist.skew_label}</span>
-                <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono bg-surface text-muted-foreground")}>{dist.kurt_label}</span>
+                {dist.skew_label && <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono bg-surface text-muted-foreground")}>{dist.skew_label}</span>}
+                {dist.kurt_label && <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono bg-surface text-muted-foreground")}>{dist.kurt_label}</span>}
               </div>
             </div>
             {/* Mini Histogram */}
-            <div className="flex items-end gap-px h-20 mb-2">
-              {dist.bins.map((bin: any, i: number) => (
-                <div key={i} className="flex-1 flex flex-col items-center justify-end" title={`${bin.lo.toFixed(1)} – ${bin.hi.toFixed(1)}: ${bin.count}`}>
-                  <div className="w-full bg-blue-500/60 hover:bg-blue-500 rounded-t-sm transition-colors"
-                    style={{ height: `${(bin.count / (maxCount || 1)) * 100}%`, minHeight: bin.count > 0 ? "2px" : "0px" }} />
-                </div>
-              ))}
-            </div>
+            {bins.length > 0 ? (
+              <div className="flex items-end gap-px h-20 mb-2">
+                {bins.map((bin: any, i: number) => {
+                  const count = num(bin?.count);
+                  return (
+                    <div key={i} className="flex-1 flex flex-col items-center justify-end" title={`${fmt(bin?.lo, 1)} – ${fmt(bin?.hi, 1)}: ${count}`}>
+                      <div className="w-full bg-blue-500/60 hover:bg-blue-500 rounded-t-sm transition-colors"
+                        style={{ height: `${(count / (maxCount || 1)) * 100}%`, minHeight: count > 0 ? "2px" : "0px" }} />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground py-4 text-center">No histogram bins returned.</p>
+            )}
             <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
-              <span>{dist.p5.toLocaleString()} (P5)</span>
-              <span className="text-blue-500 font-medium">μ {dist.mean.toLocaleString()}</span>
-              <span>{dist.p95.toLocaleString()} (P95)</span>
+              <span>{fmt(dist.p5, 1)} (P5)</span>
+              <span className="text-blue-500 font-medium">μ {fmt(dist.mean, 1)}</span>
+              <span>{fmt(dist.p95, 1)} (P95)</span>
             </div>
             <div className="grid grid-cols-4 gap-2 mt-3">
-              <MiniStat label="Skewness" value={dist.skewness.toFixed(3)} />
-              <MiniStat label="Kurtosis" value={dist.kurtosis.toFixed(3)} />
-              <MiniStat label="CV%" value={`${dist.cv_pct.toFixed(1)}%`} />
-              <MiniStat label="Shapiro p" value={dist.shapiro_p < 0.001 ? "<0.001" : dist.shapiro_p.toFixed(3)} />
+              <MiniStat label="Skewness" value={fmt(dist.skewness, 3)} />
+              <MiniStat label="Kurtosis" value={fmt(dist.kurtosis, 3)} />
+              <MiniStat label="CV%" value={`${fmt(dist.cv_pct, 1)}%`} />
+              <MiniStat label="Shapiro p" value={typeof dist.shapiro_p === "number" && dist.shapiro_p < 0.001 ? "<0.001" : fmt(dist.shapiro_p, 3)} />
             </div>
           </div>
         );
@@ -1073,9 +1128,9 @@ const DistributionsPanel = ({ data, loading, error }: { data: any | null; loadin
 /* ---------- NEW: Relationships Panel ---------- */
 
 const RelationshipsPanel = ({ data, loading, error }: { data: any | null; loading: boolean; error: boolean }) => {
-  if (error) return <EmptyState icon={Network} title="Unable to load relationships" subtitle="The backend server may need to be restarted with the latest code. Rebuild & restart Docker containers." />;
+  if (error) return <EmptyState icon={Network} title="Unable to load relationships" subtitle="Try re-running analysis after the dataset finishes ingesting." />;
   if (loading) return <SkeletonChart />;
-  const rels = data?.relationships ?? [];
+  const rels = Array.isArray(data?.relationships) ? data.relationships : [];
   if (!rels.length) return <EmptyState icon={Network} title="No relationships discovered" subtitle="The engine auto-detects FK candidates, functional dependencies, and constant ratios between columns." />;
 
   const typeColor: Record<string, string> = {
@@ -1094,7 +1149,7 @@ const RelationshipsPanel = ({ data, loading, error }: { data: any | null; loadin
         <div className="space-y-2">
           {rels.map((r: any, i: number) => (
             <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-surface/50 border border-border/60 animate-fade-in-up" style={{ animationDelay: `${i * 50}ms` }}>
-              <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono uppercase whitespace-nowrap", typeColor[r.type] || "bg-surface text-muted-foreground")}>{r.type.replace(/_/g, " ")}</span>
+              <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono uppercase whitespace-nowrap", typeColor[r.type] || "bg-surface text-muted-foreground")}>{String(r.type ?? "unknown").replace(/_/g, " ")}</span>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5 text-sm">
                   <span className="font-mono font-medium text-foreground">{r.col_a}</span>
@@ -1115,11 +1170,17 @@ const RelationshipsPanel = ({ data, loading, error }: { data: any | null; loadin
 /* ---------- NEW: Drift Panel ---------- */
 
 const DriftPanel = ({ data, loading, error }: { data: any | null; loading: boolean; error: boolean }) => {
-  if (error) return <EmptyState icon={Signal} title="Unable to load drift analysis" subtitle="The backend server may need to be restarted with the latest code. Rebuild & restart Docker containers." />;
+  if (error) return <EmptyState icon={Signal} title="Unable to load drift analysis" subtitle="Try re-running analysis after the dataset finishes ingesting." />;
   if (loading) return <SkeletonChart />;
   if (!data || data.error) return <EmptyState icon={Signal} title={data?.error || "Drift detection requires 20+ rows"} subtitle="The engine splits your data in half and compares distributions using KS-test & Population Stability Index (PSI)." />;
 
-  const results = data.drift_results ?? [];
+  const num = (v: unknown, fallback = 0): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  const fmt = (v: unknown, digits = 2): string => num(v).toLocaleString(undefined, { maximumFractionDigits: digits });
+
+  const results = Array.isArray(data.drift_results) ? data.drift_results : [];
+  const splitAt = num(data.split_at_row);
+  const totalRows = num(data.total_rows);
   const driftColor: Record<string, string> = { low: "bg-success/10 text-success", moderate: "bg-warning/10 text-warning", high: "bg-destructive/10 text-destructive" };
 
   return (
@@ -1128,27 +1189,27 @@ const DriftPanel = ({ data, loading, error }: { data: any | null; loading: boole
         <h3 className="text-sm font-semibold mb-1 flex items-center gap-2">
           <Signal className="h-4 w-4 text-accent" /> Data Drift Analysis
         </h3>
-        <p className="text-[11px] text-muted-foreground mb-4">Split at row {data.split_at_row.toLocaleString()} of {data.total_rows.toLocaleString()} · {data.columns_drifted}/{data.columns_analyzed} columns show drift</p>
+        <p className="text-[11px] text-muted-foreground mb-4">Split at row {splitAt.toLocaleString()} of {totalRows.toLocaleString()} · {num(data.columns_drifted)}/{num(data.columns_analyzed)} columns show drift</p>
 
         <div className="grid grid-cols-3 gap-3 mb-4">
-          <StatBlock label="Columns Analyzed" value={String(data.columns_analyzed)} />
-          <StatBlock label="Drifted" value={String(data.columns_drifted)} />
-          <StatBlock label="Split Point" value={`Row ${data.split_at_row.toLocaleString()}`} />
+          <StatBlock label="Columns Analyzed" value={String(num(data.columns_analyzed))} />
+          <StatBlock label="Drifted" value={String(num(data.columns_drifted))} />
+          <StatBlock label="Split Point" value={`Row ${splitAt.toLocaleString()}`} />
         </div>
       </div>
 
       <div className="space-y-2">
         {results.map((r: any, i: number) => (
-          <div key={r.column} className="card-soft p-4 animate-fade-in-up" style={{ animationDelay: `${i * 50}ms` }}>
+          <div key={r?.column ?? i} className="card-soft p-4 animate-fade-in-up" style={{ animationDelay: `${i * 50}ms` }}>
             <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-foreground">{r.column}</span>
-              <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono uppercase", driftColor[r.drift_level])}>{r.drift_level} drift</span>
+              <span className="text-sm font-medium text-foreground">{r?.column ?? "—"}</span>
+              <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono uppercase", driftColor[r?.drift_level] ?? "bg-surface text-muted-foreground")}>{r?.drift_level ?? "unknown"} drift</span>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-              <MiniStat label="KS Statistic" value={r.ks_statistic.toFixed(4)} />
-              <MiniStat label="PSI" value={r.psi.toFixed(4)} />
-              <MiniStat label="Mean (1st half)" value={r.mean_a.toLocaleString()} />
-              <MiniStat label="Mean (2nd half)" value={r.mean_b.toLocaleString()} />
+              <MiniStat label="KS Statistic" value={fmt(r?.ks_statistic, 4)} />
+              <MiniStat label="PSI" value={fmt(r?.psi, 4)} />
+              <MiniStat label="Mean (1st half)" value={fmt(r?.mean_a, 2)} />
+              <MiniStat label="Mean (2nd half)" value={fmt(r?.mean_b, 2)} />
             </div>
           </div>
         ))}
@@ -1199,21 +1260,26 @@ const ImportancePanel = ({ columns, datasetId }: { columns: string[]; datasetId:
 
         {features.length > 0 && (
           <div className="space-y-2">
-            {features.map((f: any, i: number) => (
-              <div key={f.feature} className="flex items-center gap-3 animate-fade-in-up" style={{ animationDelay: `${i * 40}ms` }}>
-                <span className="text-xs font-mono text-muted-foreground w-6 text-right">{i + 1}</span>
-                <span className="text-sm font-medium text-foreground w-32 truncate">{f.feature}</span>
-                <div className="flex-1 h-4 rounded-full bg-border/40 overflow-hidden">
-                  <div className="h-full rounded-full bg-gradient-to-r from-accent to-blue-500 transition-all duration-500"
-                    style={{ width: `${f.importance_pct}%` }} />
+            {features.map((f: any, i: number) => {
+              const pct = typeof f?.importance_pct === "number" && Number.isFinite(f.importance_pct) ? f.importance_pct : 0;
+              const corr = typeof f?.correlation === "number" && Number.isFinite(f.correlation) ? f.correlation : null;
+              const mi = typeof f?.mutual_info === "number" && Number.isFinite(f.mutual_info) ? f.mutual_info : null;
+              return (
+                <div key={f?.feature ?? i} className="flex items-center gap-3 animate-fade-in-up" style={{ animationDelay: `${i * 40}ms` }}>
+                  <span className="text-xs font-mono text-muted-foreground w-6 text-right">{i + 1}</span>
+                  <span className="text-sm font-medium text-foreground w-32 truncate">{f?.feature ?? "—"}</span>
+                  <div className="flex-1 h-4 rounded-full bg-border/40 overflow-hidden">
+                    <div className="h-full rounded-full bg-gradient-to-r from-accent to-blue-500 transition-all duration-500"
+                      style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+                  </div>
+                  <span className="text-xs font-semibold tabular-nums w-14 text-right">{pct.toFixed(1)}%</span>
+                  <div className="hidden sm:flex items-center gap-1">
+                    {corr !== null && <span className="text-[10px] text-muted-foreground font-mono">r={corr.toFixed(2)}</span>}
+                    {mi !== null && <span className="text-[10px] text-muted-foreground font-mono">MI={mi.toFixed(2)}</span>}
+                  </div>
                 </div>
-                <span className="text-xs font-semibold tabular-nums w-14 text-right">{f.importance_pct.toFixed(1)}%</span>
-                <div className="hidden sm:flex items-center gap-1">
-                  <span className="text-[10px] text-muted-foreground font-mono">r={f.correlation.toFixed(2)}</span>
-                  <span className="text-[10px] text-muted-foreground font-mono">MI={f.mutual_info.toFixed(2)}</span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 

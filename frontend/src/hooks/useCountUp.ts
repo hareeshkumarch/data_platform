@@ -9,6 +9,7 @@ export function useCountUp(
   opts: { duration?: number; decimals?: number; prefix?: string; suffix?: string } = {}
 ) {
   const { duration = 900, decimals = 0, prefix = "", suffix = "" } = opts;
+  const safeValue = typeof value === "number" && Number.isFinite(value) ? value : 0;
   const [n, setN] = useState(0);
   const startRef = useRef<number | null>(null);
   const fromRef = useRef(0);
@@ -22,17 +23,18 @@ export function useCountUp(
       const elapsed = t - startRef.current;
       const p = Math.min(1, elapsed / duration);
       const eased = 1 - Math.pow(1 - p, 3);
-      setN(fromRef.current + (value - fromRef.current) * eased);
+      setN(fromRef.current + (safeValue - fromRef.current) * eased);
       if (p < 1) raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, duration]);
+  }, [safeValue, duration]);
 
+  const safeN = Number.isFinite(n) ? n : 0;
   const formatted =
     decimals > 0
-      ? n.toFixed(decimals)
-      : Math.round(n).toLocaleString();
+      ? safeN.toFixed(decimals)
+      : Math.round(safeN).toLocaleString();
   return `${prefix}${formatted}${suffix}`;
 }

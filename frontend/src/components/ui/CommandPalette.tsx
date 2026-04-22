@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Command } from "cmdk";
 import { useNavigate } from "react-router-dom";
-import { Search, Database, LineChart, FileText, Settings, Sparkles, X } from "lucide-react";
+import { Search, Database, LineChart, FileText, Settings, Sparkles, Wand2, X } from "lucide-react";
 import { useDatasetStore } from "@/store/useDatasetStore";
 import { useAppStore } from "@/store/useAppStore";
 
@@ -77,6 +77,14 @@ export function CommandPalette() {
             >
               <LineChart className="mr-2 h-4 w-4" />
               <span>Insights & Analytics</span>
+            </Command.Item>
+            <Command.Item
+              value="Clean Data — Data Cleaning"
+              onSelect={() => runCommand(() => navigate("/cleaning"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <Wand2 className="mr-2 h-4 w-4" />
+              <span>Data Cleaning</span>
             </Command.Item>
             <Command.Item 
               value="Talk to AI Agent"

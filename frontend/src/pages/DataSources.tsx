@@ -2,7 +2,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { useState, useCallback, useEffect } from "react";
 import {
   Upload, FileText, CheckCircle2, X, Database, Files, Sparkles, Wand2, Activity, TrendingUp,
-  AlertTriangle,
+  AlertTriangle, GitCompare,
 } from "lucide-react";
 import { MetricTile } from "@/components/cards/MetricTile";
 import { cn } from "@/lib/utils";
@@ -54,6 +54,12 @@ const DataSources = () => {
   const [drag, setDrag] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareA, setCompareA] = useState<string | null>(null);
+  const [compareB, setCompareB] = useState<string | null>(null);
+  const [compareMetric, setCompareMetric] = useState<string>("");
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareResult, setCompareResult] = useState<any>(null);
   const { invalidate: invalidateStore } = useDatasetStore();
 
   const { data: datasetsResp, isLoading: loadingDatasets } = useQuery({
@@ -223,6 +229,33 @@ const DataSources = () => {
     }
   };
 
+  const runCompare = async () => {
+    if (!compareA || !compareB || !compareMetric) return;
+    setCompareLoading(true);
+    try {
+      const result = await apiFetch<any>(`/compare`, {
+        method: "POST",
+        body: JSON.stringify({
+          dataset_id_a: compareA,
+          dataset_id_b: compareB,
+          metric_col: compareMetric,
+        }),
+      });
+      setCompareResult(result);
+      toast.success("Comparison complete");
+    } catch (err: any) {
+      toast.error(err.message || "Comparison failed");
+    } finally {
+      setCompareLoading(false);
+    }
+  };
+
+  const numericColumns = (dsId: string | null) => {
+    if (!dsId) return [];
+    const ds = datasets.find((d) => d.id === dsId);
+    return (ds as any)?.numeric_summary?.map((c: any) => c.column) ?? [];
+  };
+
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setDrag(false);
@@ -330,7 +363,23 @@ const DataSources = () => {
         {/* Datasets list */}
         {datasets.length > 0 && (
           <section className="space-y-3">
-            <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">Datasets</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">Datasets</h2>
+              {datasets.length >= 2 && (
+                <button
+                  onClick={() => {
+                    setCompareOpen(true);
+                    setCompareA(datasets[0]?.id ?? null);
+                    setCompareB(datasets[1]?.id ?? null);
+                    setCompareResult(null);
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent/80 transition-colors"
+                >
+                  <GitCompare className="h-3.5 w-3.5" />
+                  Compare datasets
+                </button>
+              )}
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3" data-testid="dataset-list">
               {datasets.map((d) => (
                 <button key={d.id}
@@ -364,6 +413,98 @@ const DataSources = () => {
           </section>
         )}
 
+        {/* Dataset Comparison */}
+        {compareOpen && (
+          <section className="space-y-3 animate-fade-in-up">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-semibold">Compare Datasets</h2>
+              <button onClick={() => { setCompareOpen(false); setCompareResult(null); }} className="text-muted-foreground hover:text-foreground">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="card-soft p-5 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-muted-foreground mb-1">Dataset A</label>
+                  <select
+                    value={compareA ?? ""}
+                    onChange={(e) => setCompareA(e.target.value)}
+                    className="w-full h-9 rounded-lg border border-border bg-card px-3 text-sm"
+                  >
+                    {datasets.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name || d.filename || d.id}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-muted-foreground mb-1">Dataset B</label>
+                  <select
+                    value={compareB ?? ""}
+                    onChange={(e) => setCompareB(e.target.value)}
+                    className="w-full h-9 rounded-lg border border-border bg-card px-3 text-sm"
+                  >
+                    {datasets.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name || d.filename || d.id}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-muted-foreground mb-1">Metric column</label>
+                  <select
+                    value={compareMetric}
+                    onChange={(e) => setCompareMetric(e.target.value)}
+                    className="w-full h-9 rounded-lg border border-border bg-card px-3 text-sm"
+                  >
+                    <option value="">Select column…</option>
+                    {numericColumns(compareA).map((c: string) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <button
+                onClick={runCompare}
+                disabled={compareLoading || !compareA || !compareB || !compareMetric}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
+              >
+                <GitCompare className="h-4 w-4" />
+                {compareLoading ? "Comparing…" : "Run comparison"}
+              </button>
+
+              {compareResult && compareResult.metric_comparison && (
+                <div className="mt-4 rounded-xl border border-border bg-card p-4 animate-fade-in">
+                  <h3 className="text-sm font-semibold mb-3">Metric comparison: {compareResult.metric_comparison.column}</h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="rounded-lg bg-surface p-3 border border-border">
+                      <p className="text-[11px] text-muted-foreground">{compareResult.dataset_a?.name || "Dataset A"} Mean</p>
+                      <p className="text-lg font-semibold tabular-nums">{Number(compareResult.metric_comparison.a_mean).toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                    </div>
+                    <div className="rounded-lg bg-surface p-3 border border-border">
+                      <p className="text-[11px] text-muted-foreground">{compareResult.dataset_b?.name || "Dataset B"} Mean</p>
+                      <p className="text-lg font-semibold tabular-nums">{Number(compareResult.metric_comparison.b_mean).toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                    </div>
+                    <div className="rounded-lg bg-surface p-3 border border-border">
+                      <p className="text-[11px] text-muted-foreground">Difference</p>
+                      <p className={cn(
+                        "text-lg font-semibold tabular-nums",
+                        (compareResult.metric_comparison.mean_diff_pct ?? 0) > 0 ? "text-success" : "text-destructive"
+                      )}>
+                        {compareResult.metric_comparison.mean_diff_pct != null
+                          ? `${compareResult.metric_comparison.mean_diff_pct > 0 ? "+" : ""}${compareResult.metric_comparison.mean_diff_pct}%`
+                          : "N/A"}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-surface p-3 border border-border">
+                      <p className="text-[11px] text-muted-foreground">Std Dev A / B</p>
+                      <p className="text-sm font-semibold tabular-nums">{Number(compareResult.metric_comparison.a_std).toFixed(2)} / {Number(compareResult.metric_comparison.b_std).toFixed(2)}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* Stats panel */}
         {stats && (
           <section className="space-y-3 animate-fade-in-up">
@@ -382,17 +523,22 @@ const DataSources = () => {
               <div className="card-soft p-5">
                 <h3 className="text-sm font-semibold mb-3">Numeric highlights</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {stats.numeric_summary.map((col) => (
-                    <div key={col.column} className="rounded-lg bg-surface p-3 border border-border">
-                      <p className="text-xs font-medium text-foreground truncate">{col.column}</p>
-                      <p className="text-lg font-semibold tabular-nums">{col.mean.toLocaleString()}</p>
-                      <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground font-mono">
-                        <span>min {col.min.toLocaleString()}</span>
-                        <span>·</span>
-                        <span>max {col.max.toLocaleString()}</span>
+                  {stats.numeric_summary.map((col) => {
+                    const mean = typeof col?.mean === "number" && Number.isFinite(col.mean) ? col.mean : null;
+                    const min = typeof col?.min === "number" && Number.isFinite(col.min) ? col.min : null;
+                    const max = typeof col?.max === "number" && Number.isFinite(col.max) ? col.max : null;
+                    return (
+                      <div key={col?.column ?? Math.random()} className="rounded-lg bg-surface p-3 border border-border">
+                        <p className="text-xs font-medium text-foreground truncate">{col?.column ?? "—"}</p>
+                        <p className="text-lg font-semibold tabular-nums">{mean !== null ? mean.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}</p>
+                        <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground font-mono">
+                          <span>min {min !== null ? min.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}</span>
+                          <span>·</span>
+                          <span>max {max !== null ? max.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}</span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

@@ -7,6 +7,7 @@ import {
   FileText,
   Settings,
   Activity,
+  Wand2,
 } from "lucide-react";
 import {
   Sidebar,
@@ -26,6 +27,7 @@ import { cn } from "@/lib/utils";
 const workspaceItems = [
   { title: "Insights",     url: "/",           icon: Sparkles,        end: true },
   { title: "Data Sources", url: "/data",       icon: Database },
+  { title: "Data Cleaning",url: "/cleaning",   icon: Wand2 },
   { title: "Query",        url: "/query",      icon: MessageSquare },
   { title: "Dashboards",   url: "/dashboards", icon: LayoutDashboard },
   { title: "Reports",      url: "/reports",    icon: FileText },

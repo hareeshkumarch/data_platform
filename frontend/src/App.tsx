@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useThemeSync } from "@/hooks/useThemeSync";
 import Insights from "./pages/Insights";
 import DataSources from "./pages/DataSources";
+import DataCleaning from "./pages/DataCleaning";
 import Query from "./pages/Query";
 import Dashboards from "./pages/Dashboards";
 import Reports from "./pages/Reports";
@@ -70,6 +71,7 @@ const ThemedApp = () => {
       <Routes>
         <Route path="/" element={<Insights />} />
         <Route path="/data" element={<DataSources />} />
+        <Route path="/cleaning" element={<DataCleaning />} />
         <Route path="/query" element={<Query />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/reports" element={<Reports />} />

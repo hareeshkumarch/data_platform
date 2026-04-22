@@ -88,7 +88,8 @@ class AdvancedAnalytics:
             pivot = grouped.pivot(
                 index="cohort", columns="period_index", values="users"
             )
-            retention = (pivot.divide(pivot.iloc[:, 0], axis=0) * 100).round(1)
+            base = pivot.iloc[:, 0].replace(0, np.nan)
+            retention = (pivot.divide(base, axis=0) * 100).round(1)
 
             return {
                 "cohorts": [str(c) for c in retention.index],
@@ -402,7 +403,8 @@ class AdvancedAnalytics:
 
             skew_val = float(sp.skew(s))
             kurt_val = float(sp.kurtosis(s))
-            cv = abs(float(s.std()) / float(s.mean())) * 100 if s.mean() != 0 else 0
+            _mean = float(s.mean())
+            cv = abs(float(s.std()) / _mean) * 100 if _mean != 0 and math.isfinite(_mean) else 0
 
             results.append({
                 "column": col,
@@ -661,6 +663,163 @@ class AdvancedAnalytics:
             "drift_results": results,
         }
 
+    # ── Forecasting (with confidence intervals) ─────────────────────────────
+
+    @staticmethod
+    def forecast_series(
+        df: pd.DataFrame,
+        date_col: str,
+        value_col: str,
+        horizon: int = 14,
+        method: str = "auto",
+    ) -> Dict[str, Any]:
+        """Produce a point forecast with 80% and 95% confidence bands.
+
+        Strategy:
+        * ``method="linear"`` — OLS trend + residual-based bands. Robust and
+          always available (only scipy required).
+        * ``method="holt"`` — double exponential smoothing (captures trend).
+        * ``method="holt_winters"`` — triple exp smoothing if a weekly season
+          is detected (len >= 14) and ``statsmodels`` is installed.
+        * ``method="auto"`` — picks the best of the above by in-sample error.
+        """
+        try:
+            ts = df[[date_col, value_col]].copy()
+            ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
+            ts = ts.dropna().sort_values(date_col).set_index(date_col)[value_col]
+            ts = ts.asfreq(pd.infer_freq(ts.index) or "D").interpolate()
+            n = len(ts)
+            if n < 5:
+                return {"error": "Need at least 5 data points for forecasting."}
+            horizon = max(1, min(int(horizon), 180))
+
+            candidates = []
+
+            # 1) Always compute the linear baseline.
+            candidates.append(("linear", _forecast_linear(ts, horizon)))
+
+            # 2) Holt/Holt-Winters via statsmodels when available.
+            if method in ("auto", "holt", "holt_winters"):
+                try:
+                    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+                    if method in ("auto", "holt"):
+                        candidates.append((
+                            "holt",
+                            _forecast_exp_smoothing(
+                                ts, horizon, ExponentialSmoothing, seasonal=None
+                            ),
+                        ))
+                    if method in ("auto", "holt_winters") and n >= 14:
+                        candidates.append((
+                            "holt_winters",
+                            _forecast_exp_smoothing(
+                                ts, horizon, ExponentialSmoothing,
+                                seasonal="add", seasonal_periods=7,
+                            ),
+                        ))
+                except Exception:
+                    # statsmodels absent or fit failed — rely on linear baseline.
+                    pass
+
+            # Filter failures and pick the best by in-sample RMSE.
+            valid = [(name, res) for name, res in candidates if res is not None]
+            if not valid:
+                return {"error": "All forecast methods failed."}
+
+            if method == "auto":
+                name, chosen = min(valid, key=lambda kv: kv[1]["rmse_in_sample"])
+            else:
+                preferred = [kv for kv in valid if kv[0] == method]
+                name, chosen = (preferred or valid)[0]
+
+            last_date = ts.index[-1]
+            freq = pd.infer_freq(ts.index) or "D"
+            future_index = pd.date_range(
+                start=last_date + pd.tseries.frequencies.to_offset(freq),
+                periods=horizon,
+                freq=freq,
+            )
+
+            return {
+                "method": name,
+                "horizon": horizon,
+                "dates_historical": ts.index.astype(str).tolist(),
+                "values_historical": [_safe(v) for v in ts.tolist()],
+                "dates_forecast": [d.isoformat() for d in future_index],
+                "forecast": [_safe(v) for v in chosen["forecast"]],
+                "lower_80": [_safe(v) for v in chosen["lower_80"]],
+                "upper_80": [_safe(v) for v in chosen["upper_80"]],
+                "lower_95": [_safe(v) for v in chosen["lower_95"]],
+                "upper_95": [_safe(v) for v in chosen["upper_95"]],
+                "rmse_in_sample": round(float(chosen["rmse_in_sample"]), 4),
+                "mape_in_sample": round(float(chosen.get("mape_in_sample", 0.0)), 2),
+                "confidence_note": (
+                    "Bands derived from residual standard deviation and assume "
+                    "approximately Gaussian errors."
+                ),
+            }
+        except Exception as e:
+            logger.warning("forecast failed", error=str(e))
+            return {"error": str(e)}
+
+    # ── Seasonal anomaly detection ──────────────────────────────────────────
+
+    @staticmethod
+    def seasonal_anomalies(
+        df: pd.DataFrame,
+        date_col: str,
+        value_col: str,
+        period: int = 7,
+        z_threshold: float = 3.0,
+    ) -> Dict[str, Any]:
+        """Detect anomalies in time-series after removing trend + seasonality.
+
+        Unlike the plain Z-score detector, this deseasonalises the series first
+        so recurring weekly/monthly dips are not flagged as outliers.
+        """
+        try:
+            ts = df[[date_col, value_col]].copy()
+            ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
+            ts = ts.dropna().sort_values(date_col).set_index(date_col)[value_col]
+            if len(ts) < period * 2:
+                return {"error": f"Need at least {period * 2} points."}
+
+            trend = ts.rolling(window=period, center=True, min_periods=1).mean()
+            detrended = ts - trend
+            seasonal = detrended.groupby(np.arange(len(detrended)) % period).transform("mean")
+            residual = (ts - trend - seasonal).dropna()
+
+            mu = float(residual.mean())
+            sigma = float(residual.std()) or 1e-9
+            robust_sigma = float((residual - residual.median()).abs().median() * 1.4826) or sigma
+
+            anomalies = []
+            for ts_idx, val in residual.items():
+                z = (val - mu) / sigma
+                robust_z = (val - residual.median()) / robust_sigma
+                if abs(robust_z) >= z_threshold:
+                    anomalies.append({
+                        "date": ts_idx.isoformat() if hasattr(ts_idx, "isoformat") else str(ts_idx),
+                        "value": _safe(ts.loc[ts_idx]),
+                        "residual": round(float(val), 4),
+                        "z_score": round(float(z), 3),
+                        "robust_z": round(float(robust_z), 3),
+                        "direction": "spike" if robust_z > 0 else "dip",
+                    })
+
+            anomalies.sort(key=lambda a: abs(a["robust_z"]), reverse=True)
+            return {
+                "method": "seasonal_robust_z",
+                "period": period,
+                "threshold": z_threshold,
+                "points_checked": int(len(residual)),
+                "anomaly_count": len(anomalies),
+                "anomalies": anomalies[:100],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     # ── Feature Importance ────────────────────────────────────────────────────
 
     @staticmethod
@@ -755,3 +914,85 @@ def _entropy(vc: pd.Series) -> float:
 
 def _clean_list(lst: list) -> list:
     return [_safe(v) for v in lst]
+
+
+def _forecast_linear(ts: pd.Series, horizon: int) -> Optional[Dict[str, Any]]:
+    """OLS linear trend forecast with residual-std based confidence bands.
+
+    Returns ``None`` if the fit would be degenerate.
+    """
+    try:
+        from scipy import stats as sp
+
+        y = ts.values.astype(float)
+        x = np.arange(len(y))
+        slope, intercept, *_ = sp.linregress(x, y)
+        fitted = intercept + slope * x
+        residuals = y - fitted
+        sigma = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else 0.0
+        # Growing uncertainty band — std scales with sqrt(step) as a simple
+        # approximation of forecast-variance expansion.
+        future_x = np.arange(len(y), len(y) + horizon)
+        point = intercept + slope * future_x
+        step = np.sqrt(np.arange(1, horizon + 1))
+        band80 = 1.2816 * sigma * step
+        band95 = 1.9600 * sigma * step
+        mape = _mape(y, fitted)
+        return {
+            "forecast": point.tolist(),
+            "lower_80": (point - band80).tolist(),
+            "upper_80": (point + band80).tolist(),
+            "lower_95": (point - band95).tolist(),
+            "upper_95": (point + band95).tolist(),
+            "rmse_in_sample": float(np.sqrt(np.mean(residuals ** 2))),
+            "mape_in_sample": mape,
+        }
+    except Exception:
+        return None
+
+
+def _forecast_exp_smoothing(
+    ts: pd.Series,
+    horizon: int,
+    ExponentialSmoothing,
+    seasonal: Optional[str] = None,
+    seasonal_periods: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Holt / Holt-Winters forecast with residual-based confidence bands."""
+    try:
+        model = ExponentialSmoothing(
+            ts,
+            trend="add",
+            seasonal=seasonal,
+            seasonal_periods=seasonal_periods,
+            initialization_method="estimated",
+        ).fit(optimized=True)
+        fitted = model.fittedvalues
+        residuals = (ts - fitted).dropna().values
+        sigma = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else 0.0
+        point = np.asarray(model.forecast(horizon))
+        step = np.sqrt(np.arange(1, horizon + 1))
+        band80 = 1.2816 * sigma * step
+        band95 = 1.9600 * sigma * step
+        mape = _mape(ts.values.astype(float), fitted.values.astype(float))
+        return {
+            "forecast": point.tolist(),
+            "lower_80": (point - band80).tolist(),
+            "upper_80": (point + band80).tolist(),
+            "lower_95": (point - band95).tolist(),
+            "upper_95": (point + band95).tolist(),
+            "rmse_in_sample": float(np.sqrt(np.mean(residuals ** 2))) if len(residuals) else 0.0,
+            "mape_in_sample": mape,
+        }
+    except Exception:
+        return None
+
+
+def _mape(actual: np.ndarray, predicted: np.ndarray) -> float:
+    try:
+        mask = actual != 0
+        if not mask.any():
+            return 0.0
+        return float(np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100)
+    except Exception:
+        return 0.0

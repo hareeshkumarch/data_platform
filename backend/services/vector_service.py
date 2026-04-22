@@ -98,9 +98,28 @@ class FAISSStore:
             if not len(vecs):
                 return
             faiss.normalize_L2(vecs)
+
+            # Reload persisted index from disk before appending so a backend
+            # restart doesn't wipe out an existing FAISS index for this
+            # dataset. Previously the in-memory check treated a fresh
+            # process as "no prior index" and overwrote disk on ``_persist``.
+            if dataset_id not in self._indexes:
+                self._load(dataset_id)
             if dataset_id not in self._indexes:
                 self._indexes[dataset_id] = faiss.IndexFlatIP(vecs.shape[1])
                 self._docs[dataset_id] = []
+            elif self._indexes[dataset_id].d != vecs.shape[1]:
+                # Embedding dimension changed (e.g. different embedder). Reset
+                # rather than raise — keeps ingestion flowing.
+                logger.warning(
+                    "FAISS dim mismatch — rebuilding index",
+                    dataset_id=dataset_id,
+                    existing=self._indexes[dataset_id].d,
+                    incoming=int(vecs.shape[1]),
+                )
+                self._indexes[dataset_id] = faiss.IndexFlatIP(vecs.shape[1])
+                self._docs[dataset_id] = []
+
             self._indexes[dataset_id].add(vecs)
             self._docs[dataset_id].extend(docs)
             self._persist(dataset_id)

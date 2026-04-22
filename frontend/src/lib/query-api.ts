@@ -41,6 +41,8 @@ export interface QueryMessage {
   mode: QueryMode;
   rows?: Record<string, unknown>[];
   charts?: any[];
+  /** Model id used to generate the reply (shown as a transparency badge). */
+  model?: string;
 }
 
 export interface Conversation {

@@ -67,7 +67,7 @@ export const InsightCard = ({
                 strokeWidth="2.5"
                 fill="none"
                 strokeLinecap="round"
-                strokeDasharray={`${(confidence / 100) * 81.68} 81.68`}
+                strokeDasharray={`${(Number.isFinite(confidence) ? confidence : 0) / 100 * 81.68} 81.68`}
                 className={confColor}
               />
             </svg>
@@ -93,7 +93,7 @@ export const InsightCard = ({
                       <p className="text-[11px] text-muted-foreground">{m.label}</p>
                       <div className="flex items-baseline gap-1.5 mt-0.5">
                         <span className="text-sm font-semibold text-foreground font-mono">{m.value}</span>
-                        {typeof m.delta === "number" && (
+                        {typeof m.delta === "number" && Number.isFinite(m.delta) && (
                           <span
                             className={cn(
                               "inline-flex items-center text-[10px] font-medium",

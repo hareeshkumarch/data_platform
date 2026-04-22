@@ -87,7 +87,7 @@ const Dashboards = () => {
     { label: "Active Datasets", value: datasets.length.toString(), delta: "uploaded", icon: Database, accent: false },
     { label: "Total Rows", value: totalRows.toLocaleString(), delta: `${totalCols} columns`, icon: Hash, accent: false },
     { label: "Quality Score", value: mainDataset ? `${qualityScore}` : "—", delta: `${completeness.toFixed(1)}% complete`, icon: ShieldCheck, accent: qualityScore >= 90 },
-    { label: "LLM Calls", value: systemStats ? systemStats.llm_calls.toLocaleString() : "—", delta: `${(systemStats?.llm_tokens || 0).toLocaleString()} tokens`, icon: Zap, accent: false },
+    { label: "LLM Calls", value: systemStats ? (Number(systemStats.llm_calls) || 0).toLocaleString() : "—", delta: `${(Number(systemStats?.llm_tokens) || 0).toLocaleString()} tokens`, icon: Zap, accent: false },
     { label: "Outlier Columns", value: outliers.length.toString(), delta: outliers.length === 0 ? "clean" : "columns affected", icon: AlertTriangle, accent: outliers.length === 0 },
     { label: "Missing Values", value: totalNulls === 0 ? "None" : totalNulls.toLocaleString(), delta: totalNulls === 0 ? "perfect" : `${((totalNulls / totalCells) * 100).toFixed(1)}% of cells`, icon: totalNulls === 0 ? CheckCircle2 : XCircle, accent: totalNulls === 0 },
   ];
@@ -146,22 +146,31 @@ const Dashboards = () => {
                 <DynamicChart spec={chartSpec} />
               </div>
             ))
-          ) : mainDataset && mainDataset.rows?.length > 1 ? (
-            <div className="lg:col-span-6 card-soft p-4 animate-fade-in-up" style={{ animationDelay: "240ms" }}>
-              <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground mb-3 flex items-center gap-2">
-                <BarChart3 className="h-3.5 w-3.5 text-accent" /> Primary Dataset Distribution
-              </h3>
-              <DynamicChart spec={{
-                chart: "line",
-                data: mainDataset.rows.map(row => {
-                  const numericCol = (mainDataset as any).columns?.find((c: any) => c.inferred_type === "numeric")?.name || Object.keys(row)[1] || "value";
-                  return { ...row, [numericCol]: Number(row[numericCol]) || 0 };
-                }),
-                xKey: (mainDataset as any).columns?.find((c: any) => c.inferred_type === "datetime" || c.inferred_type === "string")?.name || Object.keys(mainDataset.rows[0])[0],
-                series: [{ key: (mainDataset as any).columns?.find((c: any) => c.inferred_type === "numeric")?.name || "value", label: "Value" }],
-                height: 280,
-              }} />
-            </div>
+          ) : mainDataset && Array.isArray(mainDataset.rows) && mainDataset.rows.filter(r => r && typeof r === "object").length > 1 ? (
+            (() => {
+              // Cache derived metadata once so we don't redo the find() per row.
+              const safeRows = (mainDataset.rows as Array<Record<string, unknown>>).filter(r => r && typeof r === "object");
+              const cols = ((mainDataset as any).columns as Array<{ name: string; inferred_type?: string }> | undefined) ?? [];
+              const numericCol = cols.find(c => c?.inferred_type === "numeric")?.name || Object.keys(safeRows[0] || {})[1] || "value";
+              const xKey = cols.find(c => c?.inferred_type === "datetime" || c?.inferred_type === "string")?.name || Object.keys(safeRows[0] || {})[0] || "key";
+              return (
+                <div className="lg:col-span-6 card-soft p-4 animate-fade-in-up" style={{ animationDelay: "240ms" }}>
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground mb-3 flex items-center gap-2">
+                    <BarChart3 className="h-3.5 w-3.5 text-accent" /> Primary Dataset Distribution
+                  </h3>
+                  <DynamicChart spec={{
+                    chart: "line",
+                    data: safeRows.map(row => ({
+                      ...row,
+                      [numericCol]: Number(row[numericCol]) || 0,
+                    })),
+                    xKey,
+                    series: [{ key: numericCol, label: "Value" }],
+                    height: 280,
+                  }} />
+                </div>
+              );
+            })()
           ) : (
             <div className="lg:col-span-6 card-soft p-4 h-[280px] flex flex-col items-center justify-center border-dashed animate-fade-in-up">
               <Activity className="h-8 w-8 text-muted-foreground/20 mb-2" />
@@ -247,25 +256,28 @@ const Dashboards = () => {
             <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground mb-3 flex items-center gap-2">
               <GitBranch className="h-3.5 w-3.5 text-accent" /> Top Correlations
             </h3>
-            {correlations?.pairs?.length > 0 ? (
+            {Array.isArray(correlations?.pairs) && correlations.pairs.length > 0 ? (
               <div className="space-y-2">
-                {correlations.pairs.slice(0, 5).map((p: any) => (
-                  <div key={p.column} className="flex items-center gap-3">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-[11px] text-foreground font-medium truncate">{p.column}</span>
-                        <span className="text-[11px] font-mono font-semibold" style={{ color: p.pearson_r >= 0 ? "#22c55e" : "#ef4444" }}>
-                          {p.pearson_r >= 0 ? "+" : ""}{p.pearson_r.toFixed(2)}
-                        </span>
+                {correlations.pairs.slice(0, 5).map((p: any, i: number) => {
+                  const r = typeof p?.pearson_r === "number" && Number.isFinite(p.pearson_r) ? p.pearson_r : 0;
+                  return (
+                    <div key={p?.column ?? i} className="flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[11px] text-foreground font-medium truncate">{p?.column ?? "—"}</span>
+                          <span className="text-[11px] font-mono font-semibold" style={{ color: r >= 0 ? "#22c55e" : "#ef4444" }}>
+                            {r >= 0 ? "+" : ""}{r.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-surface overflow-hidden">
+                          <div className={cn("h-full rounded-full", r >= 0 ? "bg-success/60" : "bg-destructive/60")}
+                            style={{ width: `${Math.min(100, Math.abs(r) * 100)}%` }} />
+                        </div>
                       </div>
-                      <div className="h-1.5 rounded-full bg-surface overflow-hidden">
-                        <div className={cn("h-full rounded-full", p.pearson_r >= 0 ? "bg-success/60" : "bg-destructive/60")}
-                          style={{ width: `${Math.abs(p.pearson_r) * 100}%` }} />
-                      </div>
+                      {p?.significant && <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">sig</span>}
                     </div>
-                    {p.significant && <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">sig</span>}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="h-24 flex items-center justify-center">

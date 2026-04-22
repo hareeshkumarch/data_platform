@@ -73,9 +73,10 @@ const Query = () => {
   }, [hydrateFromServer]);
 
   // Auto-scroll
+  const msgLen = Array.isArray(active?.messages) ? active?.messages?.length : 0;
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [Array.isArray(active?.messages) ? active?.messages?.length : 0, active?.id]);
+  }, [msgLen, active?.id]);
 
   // Auto-grow textarea
   useEffect(() => {
@@ -120,8 +121,8 @@ const Query = () => {
     setInput("");
 
     if (mode === "chat") {
-      streamChatReply(prompt, activeDatasetId, (partial, done) => {
-        updateLastMessage(convId, { content: partial, streaming: !done });
+      streamChatReply(prompt, activeDatasetId, (partial, done, rows) => {
+        updateLastMessage(convId, { content: partial, streaming: !done, rows });
         if (done) setSending(false);
       });
     } else {
@@ -143,10 +144,11 @@ const Query = () => {
     }
   };
 
+  const activeMsgLen = Array.isArray(active?.messages) ? active?.messages?.length : 0;
   const messages = useMemo(() => {
     if (!active || !Array.isArray(active.messages)) return [];
     return active.messages.filter((m) => m && m.mode === mode);
-  }, [active, mode, (Array.isArray(active?.messages) ? active?.messages?.length : 0)]);
+  }, [active, mode, activeMsgLen]);
 
   return (
     <AppShell title="Query" subtitle="Ask in plain English — get verifiable answers" status="ready">
@@ -610,7 +612,6 @@ const TabbedChartViewer = ({ charts }: { charts: any[] }) => {
 
 const MessageBlock = ({ message }: { message: QueryMessage }) => {
   const isUser = message.role === "user";
-  const [showCode, setShowCode] = useState(false);
   return (
     <div className={cn("flex gap-2.5 sm:gap-3.5 animate-fade-in-up", isUser && "flex-row-reverse")}>
       <div className={cn(

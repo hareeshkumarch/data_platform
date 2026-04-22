@@ -170,8 +170,17 @@ class CacheService:
     async def get_query(self, key: str) -> Optional[Any]:
         return await self.get_json(f"query:{key}")
 
-    async def set_query(self, key: str, data: Any) -> bool:
-        return await self.set_json(f"query:{key}", data, ttl=settings.CACHE_TTL_QUERY)
+    async def set_query(self, key: str, data: Any, dataset_id: Optional[str] = None) -> bool:
+        ok = await self.set_json(f"query:{key}", data, ttl=settings.CACHE_TTL_QUERY)
+        # Maintain a reverse-index so ``invalidate_dataset`` can purge just the
+        # query keys tied to a dataset without scanning the entire store.
+        if dataset_id:
+            idx_key = f"query_idx:{dataset_id}"
+            existing = _STORE.get(idx_key) or []
+            if isinstance(existing, list) and key not in existing:
+                existing.append(key)
+                _STORE.set(idx_key, existing, settings.CACHE_TTL_QUERY)
+        return ok
 
     async def set_agent_state(self, corr_id: str, agent: str, data: Any) -> bool:
         return await self.set_json(f"state:{corr_id}:{agent}", data, ttl=3600)
@@ -194,7 +203,7 @@ class CacheService:
         return count <= limit
 
     async def invalidate_dataset(self, dataset_id: str) -> None:
-        for prefix in (
+        for key in (
             f"schema:{dataset_id}",
             f"sample:{dataset_id}",
             f"eda:{dataset_id}",
@@ -203,9 +212,20 @@ class CacheService:
             f"chart_cfg:{dataset_id}",
             f"report:{dataset_id}",
         ):
-            _STORE.delete(prefix)
-        _STORE.delete_prefix(f"query:{dataset_id}")
-        _STORE.delete_prefix(f"state:{dataset_id}")
+            _STORE.delete(key)
+
+        # Query keys are hashed so we can't pattern-match; consult the
+        # reverse-index maintained by ``set_query``.
+        idx_key = f"query_idx:{dataset_id}"
+        tracked = _STORE.get(idx_key) or []
+        if isinstance(tracked, list):
+            for k in tracked:
+                _STORE.delete(f"query:{k}")
+        _STORE.delete(idx_key)
+
+        # State keys follow ``state:{corr_id}:{agent}`` with no dataset_id
+        # embedded, so the old ``delete_prefix(f"state:{dataset_id}")`` was a
+        # no-op. Drop it — state entries already TTL out in an hour.
 
     async def ping(self) -> bool:  # noqa: D401
         """Always available — in-memory cache has no connection."""

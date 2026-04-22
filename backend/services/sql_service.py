@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import random
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,7 +37,7 @@ logger = get_logger(__name__)
 
 
 _READ_ONLY_PREFIXES = ("select", "with", "show", "explain")
-_DANGEROUS_KEYWORDS = (
+_DANGEROUS_KEYWORDS = frozenset({
     "insert",
     "update",
     "delete",
@@ -46,7 +47,32 @@ _DANGEROUS_KEYWORDS = (
     "grant",
     "revoke",
     "create",
-)
+    "merge",
+    "call",
+    "do",
+    "copy",
+    "vacuum",
+    "reindex",
+    "cluster",
+    "lock",
+})
+# Prefixes that don't accept ``LIMIT`` — appending would produce invalid SQL.
+_NO_LIMIT_PREFIXES = ("show", "explain")
+
+
+def _extract_sql_tokens(sql: str) -> list[str]:
+    """Return lowercase SQL tokens with string literals and comments stripped.
+
+    Used to classify statements without being fooled by column names like
+    ``insert_date`` or comment text like ``/* drop */``.
+    """
+    # Strip block and line comments first
+    without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    without_line = re.sub(r"--[^\n]*", " ", without_block)
+    # Strip single- and double-quoted string literals
+    without_strings = re.sub(r"'(?:''|[^'])*'", " 'str' ", without_line)
+    without_strings = re.sub(r'"(?:""|[^"])*"', ' "id" ', without_strings)
+    return [t.lower() for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", without_strings)]
 
 
 class SQLWarehouse:
@@ -158,14 +184,34 @@ class SQLWarehouse:
         if not self.enabled or self.engine is None:
             raise RuntimeError("SQL warehouse is not configured on this deployment.")
         stripped = query.strip().rstrip(";")
+        if not stripped:
+            raise ValueError("Empty query.")
+        # Reject multi-statement submissions (e.g. "SELECT 1; DROP TABLE t").
+        if ";" in stripped:
+            raise ValueError("Multiple statements are not permitted.")
+
         lower = stripped.lower()
         if not any(lower.startswith(p) for p in _READ_ONLY_PREFIXES):
-            raise ValueError("Only SELECT/WITH statements are permitted.")
-        if any(kw in lower for kw in _DANGEROUS_KEYWORDS):
-            raise ValueError("Query contains disallowed keywords.")
+            raise ValueError("Only SELECT/WITH/SHOW/EXPLAIN statements are permitted.")
+
+        # Tokenise with literals and comments stripped so column names like
+        # ``insert_date`` don't trigger the dangerous-keyword filter.
+        tokens = _extract_sql_tokens(stripped)
+        # The first token *after* WITH … AS clauses still must be SELECT. We keep
+        # the check simple: any dangerous keyword appearing as a statement verb
+        # (i.e. not inside a string/comment) is rejected.
+        offending = _DANGEROUS_KEYWORDS.intersection(tokens)
+        if offending:
+            raise ValueError(
+                f"Query contains disallowed keyword(s): {', '.join(sorted(offending))}"
+            )
+
+        # ``SHOW``/``EXPLAIN`` don't support LIMIT — don't append in those cases.
+        skip_limit = any(lower.startswith(p) for p in _NO_LIMIT_PREFIXES)
+        has_limit = bool(re.search(r"\blimit\b", lower))
         effective = (
             stripped
-            if " limit " in lower
+            if skip_limit or has_limit
             else f"{stripped} LIMIT {max(1, min(limit, 5000))}"
         )
         with self.engine.connect() as conn:
@@ -230,27 +276,40 @@ class SQLWarehouse:
     def upsert_dataset_record(self, record: Dict[str, Any]) -> None:
         if not self.enabled or self.engine is None:
             return
+        values = {
+            "id": record["id"],
+            "name": record.get("name")
+            or record.get("filename")
+            or record["id"],
+            "filename": record.get("filename"),
+            "source_type": record.get("source_type", "file"),
+            "size_bytes": int(record.get("size_bytes", 0) or 0),
+            "row_count": int(record.get("row_count", 0) or 0),
+            "col_count": int(record.get("col_count", 0) or 0),
+            "schema_json": record.get("schema_json"),
+            "created_at": record.get("created_at"),
+        }
         try:
-            with self.engine.begin() as conn:
-                conn.execute(
-                    text("DELETE FROM datasets WHERE id = :id"), {"id": record["id"]}
+            # Prefer Postgres-native ON CONFLICT for a true, atomic upsert. Fall
+            # back to DELETE+INSERT inside a single transaction for engines that
+            # do not support the dialect-specific insert (e.g. SQLite tests).
+            try:
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                stmt = pg_insert(self.datasets).values(**values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[self.datasets.c.id],
+                    set_={k: v for k, v in values.items() if k != "id"},
                 )
-                conn.execute(
-                    self.datasets.insert(),
-                    {
-                        "id": record["id"],
-                        "name": record.get("name")
-                        or record.get("filename")
-                        or record["id"],
-                        "filename": record.get("filename"),
-                        "source_type": record.get("source_type", "file"),
-                        "size_bytes": int(record.get("size_bytes", 0) or 0),
-                        "row_count": int(record.get("row_count", 0) or 0),
-                        "col_count": int(record.get("col_count", 0) or 0),
-                        "schema_json": record.get("schema_json"),
-                        "created_at": record.get("created_at"),
-                    },
-                )
+                with self.engine.begin() as conn:
+                    conn.execute(stmt)
+            except Exception:
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        text("DELETE FROM datasets WHERE id = :id"),
+                        {"id": values["id"]},
+                    )
+                    conn.execute(self.datasets.insert(), values)
         except SQLAlchemyError as exc:  # pragma: no cover
             logger.warning("dataset upsert failed", error=str(exc))
 

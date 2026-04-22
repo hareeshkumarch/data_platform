@@ -100,7 +100,7 @@ export const DynamicChart = ({ spec }: { spec: ChartSpec }) => {
               outerRadius={height * 0.35}
               paddingAngle={2}
               animationDuration={800}
-              label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+              label={({ name, percent }) => `${name ?? ""} ${typeof percent === "number" && Number.isFinite(percent) ? (percent * 100).toFixed(0) : 0}%`}
             >
               {Array.isArray(data) && data.map((_, i) => (
                 <Cell key={i} fill={palette[i % palette.length]} />
@@ -245,7 +245,8 @@ export const DynamicChart = ({ spec }: { spec: ChartSpec }) => {
         <div className="overflow-auto space-y-2 p-2" style={{ maxHeight: height }}>
           {Array.isArray(data) && data.map((d: any, i: number) => {
             const name = d.name || d[xKey] || `Group ${i + 1}`;
-            const q1 = d.q1 ?? 0, median = d.median ?? 0, q3 = d.q3 ?? 0, min = d.min ?? 0, max = d.max ?? 0;
+            const _n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+            const q1 = _n(d.q1), median = _n(d.median), q3 = _n(d.q3), min = _n(d.min), max = _n(d.max);
             const range = max - min || 1;
             return (
               <div key={i} className="flex items-center gap-2 text-[11px]">
@@ -313,9 +314,9 @@ export const DynamicChart = ({ spec }: { spec: ChartSpec }) => {
 
   /* ─────── GAUGE (RadialBar) ─────── */
   if (chart === "gauge") {
-    const gaugeVal = Number(data[0]?.[series?.[0]?.key] || data[0]?.value || 0);
-    const gaugeMax = Number(data[0]?.max || 100);
-    const pct = Math.round((gaugeVal / gaugeMax) * 100);
+    const gaugeVal = Number(data[0]?.[series?.[0]?.key] || data[0]?.value || 0) || 0;
+    const gaugeMax = Number(data[0]?.max || 100) || 100;
+    const pct = gaugeMax !== 0 ? Math.round((gaugeVal / gaugeMax) * 100) : 0;
     return (
       <div>
         {Title}
