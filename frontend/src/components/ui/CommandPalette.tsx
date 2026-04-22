@@ -1,0 +1,110 @@
+import { useEffect, useState } from "react";
+import { Command } from "cmdk";
+import { useNavigate } from "react-router-dom";
+import { Search, Database, LineChart, FileText, Settings, Sparkles, X } from "lucide-react";
+import { useDatasetStore } from "@/store/useDatasetStore";
+import { useAppStore } from "@/store/useAppStore";
+
+export function CommandPalette() {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  const activeDatasetId = useAppStore((s) => s.dataset); 
+  // Wait, I need useAppStore from store
+
+  // Toggle the menu when ⌘K is pressed
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setOpen((open) => !open);
+      }
+    };
+    document.addEventListener("keydown", down);
+    return () => document.removeEventListener("keydown", down);
+  }, []);
+
+  const runCommand = (command: () => void) => {
+    setOpen(false);
+    command();
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] bg-background/80 backdrop-blur-sm animate-in fade-in duration-200">
+      <div 
+        className="fixed inset-0" 
+        onClick={() => setOpen(false)} 
+        aria-label="Close command palette"
+      />
+      <Command 
+        className="relative z-50 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-card shadow-2xl flex flex-col"
+        onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
+      >
+        <div className="flex items-center border-b border-border px-3">
+          <Search className="mr-2 h-4 w-4 shrink-0 text-muted-foreground" />
+          <Command.Input 
+            autoFocus
+            className="flex h-12 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground" 
+            placeholder="Type a command or search..." 
+          />
+          <button 
+            onClick={() => setOpen(false)}
+            className="p-1 rounded-md hover:bg-surface text-muted-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        
+        <Command.List className="max-h-[300px] overflow-y-auto overflow-x-hidden p-2">
+          <Command.Empty className="py-6 text-center text-sm text-muted-foreground">
+            No results found.
+          </Command.Empty>
+
+          <Command.Group heading="Navigation" className="text-xs font-medium text-muted-foreground px-2 py-1.5 [&_[cmdk-group-items]]:mt-1 [&_[cmdk-group-items]]:space-y-0.5">
+            <Command.Item 
+              value="Go to Data Sources"
+              onSelect={() => runCommand(() => navigate("/data"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <Database className="mr-2 h-4 w-4" />
+              <span>Data Sources</span>
+            </Command.Item>
+            <Command.Item 
+              value="Go to Insights"
+              onSelect={() => runCommand(() => navigate("/"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <LineChart className="mr-2 h-4 w-4" />
+              <span>Insights & Analytics</span>
+            </Command.Item>
+            <Command.Item 
+              value="Talk to AI Agent"
+              onSelect={() => runCommand(() => navigate("/query"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <Sparkles className="mr-2 h-4 w-4" />
+              <span>Ask Agent</span>
+            </Command.Item>
+            <Command.Item 
+              value="Go to Reports"
+              onSelect={() => runCommand(() => navigate("/reports"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <FileText className="mr-2 h-4 w-4" />
+              <span>Reports</span>
+            </Command.Item>
+            <Command.Item 
+              value="Global Settings"
+              onSelect={() => runCommand(() => navigate("/settings"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <Settings className="mr-2 h-4 w-4" />
+              <span>Settings</span>
+            </Command.Item>
+          </Command.Group>
+        </Command.List>
+      </Command>
+    </div>
+  );
+}
