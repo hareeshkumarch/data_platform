@@ -154,6 +154,14 @@ class CacheService:
             f"charts:{dataset_id}", data, ttl=settings.CACHE_TTL_CHART
         )
 
+    async def get_report(self, dataset_id: str) -> Optional[Any]:
+        return await self.get_json(f"report:{dataset_id}")
+
+    async def set_report(self, dataset_id: str, data: Any) -> bool:
+        return await self.set_json(
+            f"report:{dataset_id}", data, ttl=settings.CACHE_TTL_LLM
+        )
+
     async def cache_chart_config(self, key: str, config: Any) -> bool:
         return await self.set_json(
             f"chart_cfg:{key}", config, ttl=settings.CACHE_TTL_CHART
@@ -193,6 +201,7 @@ class CacheService:
             f"insights:{dataset_id}",
             f"charts:{dataset_id}",
             f"chart_cfg:{dataset_id}",
+            f"report:{dataset_id}",
         ):
             _STORE.delete(prefix)
         _STORE.delete_prefix(f"query:{dataset_id}")

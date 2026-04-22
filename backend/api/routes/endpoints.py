@@ -1201,12 +1201,146 @@ async def export_insights_markdown(
     )
 
 
+@router.get("/datasets/{dataset_id}/report")
+async def get_report(
+    dataset_id: str, cache: CacheService = Depends(get_cache)
+):
+    """Return the structured Report Agent JSON for a dataset."""
+    report = await cache.get_report(dataset_id)
+    if not report:
+        raise HTTPException(404, "Report not found. Run the full pipeline first.")
+    return report
+
+
+@router.get("/export/{dataset_id}/report/pdf")
+async def export_report_pdf(
+    dataset_id: str, cache: CacheService = Depends(get_cache)
+):
+    """Generate and stream a PDF of the report using ReportLab."""
+    report = await cache.get_report(dataset_id)
+    insights = await cache.get_insights(dataset_id)
+    if not report and not insights:
+        raise HTTPException(404, "No report or insights found. Run the pipeline first.")
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib import colors
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+        )
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=A4,
+            leftMargin=2*cm, rightMargin=2*cm,
+            topMargin=2*cm, bottomMargin=2*cm
+        )
+        styles = getSampleStyleSheet()
+        accent = colors.HexColor("#6366f1")
+        dark = colors.HexColor("#1e1e2e")
+
+        title_style = ParagraphStyle("Title", parent=styles["Title"],
+            fontSize=22, textColor=dark, spaceAfter=6)
+        headline_style = ParagraphStyle("Headline", parent=styles["Normal"],
+            fontSize=11, textColor=accent, spaceAfter=16, leading=16)
+        section_title_style = ParagraphStyle("SectionTitle", parent=styles["Heading2"],
+            fontSize=13, textColor=dark, spaceBefore=18, spaceAfter=6)
+        body_style = ParagraphStyle("Body", parent=styles["Normal"],
+            fontSize=10, textColor=colors.HexColor("#374151"), leading=15, spaceAfter=8)
+        evidence_style = ParagraphStyle("Evidence", parent=styles["Normal"],
+            fontSize=9, textColor=colors.HexColor("#6b7280"), leading=13, leftIndent=12)
+        conclusion_style = ParagraphStyle("Conclusion", parent=styles["Normal"],
+            fontSize=10, textColor=dark, leading=14, leftIndent=12,
+            borderPad=4, backColor=colors.HexColor("#f5f3ff"))
+        meta_style = ParagraphStyle("Meta", parent=styles["Normal"],
+            fontSize=8, textColor=colors.grey, spaceBefore=2)
+
+        story = []
+        dataset_name = report.get("title", "Data Intelligence Report") if report else "Report"
+
+        # Header
+        story.append(Paragraph(dataset_name, title_style))
+        story.append(Paragraph(f"Generated {__import__('datetime').date.today().strftime('%B %d, %Y')}  |  Lumen Data Intelligence Platform", meta_style))
+        story.append(Spacer(1, 0.3*cm))
+        story.append(HRFlowable(width="100%", thickness=1.5, color=accent))
+        story.append(Spacer(1, 0.4*cm))
+
+        # Executive headline
+        if report and report.get("executive_headline"):
+            story.append(Paragraph(report["executive_headline"], headline_style))
+
+        # Sections
+        if report and report.get("sections"):
+            for section in sorted(report["sections"], key=lambda s: s.get("order", 99)):
+                story.append(Paragraph(section.get("title", ""), section_title_style))
+                if section.get("key_metric"):
+                    story.append(Paragraph(f"Key metric: {section['key_metric']}", evidence_style))
+                    story.append(Spacer(1, 0.2*cm))
+
+                # Strip markdown and render content
+                import re
+                raw_content = section.get("content", "")
+                raw_content = re.sub(r"#{1,6}\s*", "", raw_content)
+                raw_content = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", raw_content)
+                raw_content = re.sub(r"\*(.*?)\*", r"<i>\1</i>", raw_content)
+                raw_content = re.sub(r"`(.*?)`", r"<font name='Courier'>\1</font>", raw_content)
+                for para in raw_content.split("\n\n"):
+                    if para.strip():
+                        try:
+                            story.append(Paragraph(para.strip(), body_style))
+                        except Exception:
+                            story.append(Paragraph(para.strip()[:300], body_style))
+
+                if section.get("evidence"):
+                    story.append(Spacer(1, 0.2*cm))
+                    story.append(Paragraph("Supporting Evidence:", ParagraphStyle("EvidLabel", parent=evidence_style, textColor=dark, fontName="Helvetica-Bold")))
+                    for ev in section["evidence"][:4]:
+                        story.append(Paragraph(f"• {ev}", evidence_style))
+
+                if section.get("conclusion"):
+                    story.append(Spacer(1, 0.2*cm))
+                    story.append(Paragraph(f"Conclusion: {section['conclusion']}", conclusion_style))
+
+                story.append(Spacer(1, 0.3*cm))
+                story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb")))
+
+        # Fallback: use insights if no report
+        elif insights and insights.get("insights"):
+            for ins in insights["insights"][:8]:
+                story.append(Paragraph(ins.get("title", "Insight"), section_title_style))
+                story.append(Paragraph(ins.get("description", ""), body_style))
+                if ins.get("business_impact"):
+                    story.append(Paragraph(f"Business impact: {ins['business_impact']}", evidence_style))
+                story.append(Spacer(1, 0.3*cm))
+
+        # Footer
+        story.append(Spacer(1, 1*cm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb")))
+        story.append(Paragraph("End of document — AI output generated by Lumen Data Intelligence Platform", meta_style))
+
+        doc.build(story)
+        buf.seek(0)
+        safe_name = re.sub(r"[^a-z0-9_-]", "_", dataset_name.lower())[:40]
+        return StreamingResponse(
+            buf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={safe_name}_report.pdf"},
+        )
+
+    except ImportError:
+        raise HTTPException(500, "PDF export requires 'reportlab'. Add it to requirements.txt.")
+
+
 # ── Task + Cache ──────────────────────────────────────────────────────────────
 
 
 @router.get("/task/{task_id}")
 async def task_status(task_id: str):
     from backend.tasks.celery_app import get_task_record
+    from backend.utils.data_utils import _convert
 
     rec = get_task_record(task_id)
     if rec is None:
@@ -1218,7 +1352,8 @@ async def task_status(task_id: str):
         "progress": float(rec.progress),
     }
     if rec.state == "SUCCESS":
-        resp["result"] = rec.result
+        # Deep-sanitize to convert numpy/pandas objects to JSON-safe primitives
+        resp["result"] = _convert(rec.result)
     elif rec.state == "FAILURE":
         resp["error"] = rec.error
     elif rec.state == "PROGRESS":

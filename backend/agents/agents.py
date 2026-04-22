@@ -136,7 +136,7 @@ class IngestionAgent(BaseAgent):
                     return await asyncio.to_thread(pd.read_parquet, existing_path)
         elif source_type == "sql":
             return await self._load_sql(payload)
-        elif source_type == "api":
+        elif source_type == "api" or source_type == "url":
             return await self._load_api(payload)
 
         raise ValueError(
@@ -156,20 +156,49 @@ class IngestionAgent(BaseAgent):
 
     async def _load_api(self, payload: Dict) -> pd.DataFrame:
         import httpx
+        import io
 
         cfg = payload.get("api_config", {})
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        url = cfg.get("url") or payload.get("url")
+        if not url:
+            raise ValueError("Ingestion failed: No URL provided for API/URL source")
+
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
             resp = await client.request(
                 method=cfg.get("method", "GET"),
-                url=cfg["url"],
+                url=url,
                 headers=cfg.get("headers", {}),
                 json=cfg.get("body"),
             )
             resp.raise_for_status()
-            data = resp.json()
-        if isinstance(data, list):
-            return pd.DataFrame(data)
-        return pd.DataFrame([data])
+            
+            content_type = resp.headers.get("Content-Type", "").lower()
+            
+            # If the user specified a json_path or it looks like JSON
+            if "json" in content_type or url.endswith(".json"):
+                data = resp.json()
+                # Simple JSON path support (e.g. "data.items")
+                json_path = cfg.get("json_path")
+                if json_path:
+                    for part in json_path.split("."):
+                        if isinstance(data, dict):
+                            data = data.get(part, data)
+                
+                if isinstance(data, list):
+                    return pd.DataFrame(data)
+                return pd.DataFrame([data])
+            
+            # If it looks like CSV
+            if "csv" in content_type or url.endswith(".csv"):
+                return await asyncio.to_thread(pd.read_csv, io.BytesIO(resp.content))
+            
+            # Fallback: try to guess
+            try:
+                data = resp.json()
+                if isinstance(data, list): return pd.DataFrame(data)
+                return pd.DataFrame([data])
+            except Exception:
+                return await asyncio.to_thread(pd.read_csv, io.BytesIO(resp.content))
 
     def _validate(self, df: pd.DataFrame, cols: list) -> Dict[str, Any]:
         issues, warnings = [], []
@@ -1133,16 +1162,18 @@ class ReportAgent(BaseAgent):
                 ]
             }
 
-        return {
+        result = {
             "dataset_id": dataset_id,
             "title": payload.get("title", "Data Intelligence Report"),
+            "executive_headline": data.get("executive_headline", ""),
             "sections": data.get("sections", []),
-            "executive_summary": insights_data.get("executive_summary", ""),
             "charts": charts_data.get("charts", [])[:10],
             "provider": resp.provider.value,
             "model": resp.model,
             "tokens_used": resp.tokens_total,
         }
+        await self._cache.set_report(dataset_id, result)
+        return result
 
     def _eda_summary(self, eda: Dict) -> str:
         return (

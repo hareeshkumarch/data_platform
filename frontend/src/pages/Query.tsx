@@ -359,7 +359,11 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="card-soft animate-scale-in">
+    <div className={cn(
+      "card-soft animate-scale-in transition-all duration-500 overflow-hidden",
+      running && "animate-glow-ring border-accent/40 bg-accent/[0.02]",
+      allDone && "border-success/30 bg-success/[0.01]"
+    )}>
       {/* ── Compact header row (always visible) ── */}
       <button
         type="button"
@@ -367,43 +371,58 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
         className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-surface/30 rounded-xl transition-colors"
       >
         <div className={cn(
-          "h-6 w-6 rounded-md flex items-center justify-center shrink-0 transition-colors",
-          allDone ? "bg-success/15 text-success" : "bg-accent-soft text-accent",
+          "h-7 w-7 rounded-lg flex items-center justify-center shrink-0 transition-all duration-500 shadow-sm",
+          allDone ? "bg-success text-success-foreground" : "bg-accent text-accent-foreground",
+          running && "animate-pulse"
         )}>
-          {allDone ? <CheckCircle2 className="h-3.5 w-3.5" /> : running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Workflow className="h-3.5 w-3.5" />}
+          {allDone ? <CheckCircle2 className="h-4 w-4" /> : running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Workflow className="h-4 w-4" />}
         </div>
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-semibold text-foreground">Agent Pipeline</span>
-            <span className="text-[10px] font-mono text-muted-foreground tabular-nums">
+            <span className="text-[12px] font-bold text-foreground tracking-tight">Intelligence Pipeline</span>
+            <span className="text-[10px] font-mono text-muted-foreground tabular-nums bg-surface px-1.5 py-0.5 rounded border border-border/50">
               {completed}/{safeStages.length}
             </span>
             {allDone && (
-              <span className="text-[10px] text-muted-foreground">· {(safeStages.length * 0.7).toFixed(1)}s</span>
+              <span className="text-[10px] text-success font-medium flex items-center gap-1">
+                <CheckCircle2 className="h-2.5 w-2.5" /> Complete
+              </span>
             )}
           </div>
           {/* Inline progress bar */}
-          <div className="h-1 mt-1 rounded-full bg-border overflow-hidden">
-            <div className="h-full bg-gradient-accent transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
+          <div className="h-1.5 mt-1.5 rounded-full bg-border/50 overflow-hidden relative">
+            <div 
+              className={cn(
+                "h-full transition-all duration-700 ease-out relative",
+                allDone ? "bg-success" : "bg-gradient-accent"
+              )} 
+              style={{ width: `${progress}%` }} 
+            >
+              {!allDone && (
+                <div className="absolute inset-0 w-full h-full animate-shimmer" style={{ backgroundSize: '200% 100%' }} />
+              )}
+            </div>
           </div>
         </div>
 
         {/* Mini status dots */}
-        <div className="hidden sm:flex items-center gap-1 shrink-0">
-          {safeStages.filter(s => s && s.id).map((s) => (
-            <span
+        <div className="hidden sm:flex items-center gap-1.5 shrink-0 px-2">
+          {safeStages.filter(s => s && s.id).map((s, i) => (
+            <div
               key={s.id}
               title={s.name}
               className={cn(
-                "h-2 w-2 rounded-full transition-colors",
-                s.status === "done" && "bg-success",
-                s.status === "running" && "bg-accent animate-pulse",
-                s.status === "pending" && "bg-border",
+                "h-2 w-2 rounded-full transition-all duration-500",
+                s.status === "done" && "bg-success scale-100",
+                s.status === "running" && "bg-accent scale-150 animate-pulse-soft shadow-[0_0_10px_hsl(var(--accent)/0.6)]",
+                s.status === "pending" && "bg-border/60 scale-75",
               )}
+              style={{ transitionDelay: `${i * 50}ms` }}
             />
           ))}
         </div>
+
 
         <ChevronDown className={cn(
           "h-3.5 w-3.5 text-muted-foreground/60 shrink-0 transition-transform duration-200",
@@ -669,10 +688,17 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
 
         {!isUser && message.datasetId && !message.streaming && (
           <div>
-            {Array.isArray(message.charts) && message.charts.length > 0 ? (
-              <TabbedChartViewer charts={message.charts} />
+            {message.mode === "pipeline" ? (
+              <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-success/10 border border-success/20 text-success text-xs font-medium w-fit animate-fade-in">
+                <CheckCircle2 className="h-4 w-4" />
+                <span>Visualizations Generated &mdash; Available in Dashboards</span>
+              </div>
             ) : (
-              <ChartViewer defaultDatasetId={message.datasetId} />
+              Array.isArray(message.charts) && message.charts.length > 0 ? (
+                <TabbedChartViewer charts={message.charts} />
+              ) : (
+                <ChartViewer defaultDatasetId={message.datasetId} />
+              )
             )}
           </div>
         )}

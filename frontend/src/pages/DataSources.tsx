@@ -11,6 +11,7 @@ import { Dataset, DatasetPreview } from "@/lib/types";
 import { toast } from "sonner";
 import { useDatasetStore } from "@/store/useDatasetStore";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SourceConnect } from "@/components/cards/SourceConnect";
 
 const MAX_FILE_SIZE_MB = 500;
 const ACCEPTED_TYPES = ".csv,.json,.parquet,.xlsx,.xls";
@@ -47,7 +48,9 @@ const DataSources = () => {
   const queryClient = useQueryClient();
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStage, setUploadStage] = useState<string | null>(null);
   const [busyKind, setBusyKind] = useState<string | null>(null);
+  const [busyStage, setBusyStage] = useState<string | null>(null);
   const [drag, setDrag] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
@@ -105,6 +108,7 @@ const DataSources = () => {
     if (uploading) return;
     setUploading(true);
     setUploadProgress(0);
+    setUploadStage("Uploading...");
     const formData = new FormData();
     formData.append("file", file);
 
@@ -129,8 +133,14 @@ const DataSources = () => {
       });
 
       setUploadProgress(100);
-      toast.info(`Processing ${file.name}…`);
-      const ingestResult = await pollTask<{ success: boolean; error?: string }>(uploadResult.task_id);
+      setUploadStage("Queued...");
+      const ingestResult = await pollTask<{ success: boolean; error?: string }>(
+        uploadResult.task_id,
+        (p, s) => {
+          setUploadProgress(p);
+          if (s) setUploadStage(s);
+        }
+      );
       if (ingestResult && !ingestResult.success) throw new Error(ingestResult.error || "Ingestion failed");
       toast.success(`"${file.name}" ingested successfully`);
       invalidateStore?.();
@@ -141,19 +151,26 @@ const DataSources = () => {
     } finally {
       setUploading(false);
       setUploadProgress(0);
+      setUploadStage(null);
     }
   }, [uploading, queryClient, invalidateStore]);
 
   const seedDemo = async (kind: string) => {
     if (busyKind) return;
     setBusyKind(kind);
+    setBusyStage("Starting...");
     try {
       toast.info("Generating synthetic dataset…");
       const resp = await apiFetch<{ dataset_id: string; task_id: string; filename: string }>(
         `/datasets/seed-demo/${kind}`,
         { method: "POST" },
       );
-      const result = await pollTask<{ success: boolean; error?: string }>(resp.task_id);
+      const result = await pollTask<{ success: boolean; error?: string }>(
+        resp.task_id,
+        (p, s) => {
+          if (s) setBusyStage(s);
+        }
+      );
       if (result && !result.success) throw new Error(result.error || "Demo ingestion failed");
       toast.success("Demo dataset ready!");
       await queryClient.invalidateQueries({ queryKey: ["datasets"] });
@@ -162,6 +179,7 @@ const DataSources = () => {
       toast.error(err instanceof Error ? err.message : "Demo seed failed");
     } finally {
       setBusyKind(null);
+      setBusyStage(null);
     }
   };
 
@@ -218,72 +236,91 @@ const DataSources = () => {
         <header className="animate-fade-in-up">
           <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">Data Sources</h1>
           <p className="mt-2 text-sm text-muted-foreground max-w-2xl">
-            Drop a CSV / XLSX / Parquet / JSON, or spin up a synthetic dataset from the demo catalogue.
+            Drop a CSV / XLSX / Parquet / JSON, connect to a remote API/URL, or spin up a synthetic dataset from the demo catalogue.
             Every dataset is profiled on arrival and surfaced with one-click cleaning suggestions.
           </p>
         </header>
 
-        {/* Upload + demo row */}
+        {/* Upload + connect + demo row */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Upload Card */}
           <div
             onDrop={onDrop}
             onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
             onDragLeave={() => setDrag(false)}
             className={cn(
-              "card-soft p-8 flex flex-col items-center justify-center text-center border-dashed transition-colors",
-              drag ? "border-accent bg-accent/5" : "border-border"
+              "card-soft p-6 flex flex-col items-center justify-center text-center border-dashed transition-all duration-500",
+              drag ? "border-accent bg-accent/5" : "border-border",
+              uploading && "animate-glow-ring border-accent/40 bg-accent/[0.02]"
             )}
             data-testid="upload-area"
           >
-            <div className="h-11 w-11 rounded-full bg-accent-soft text-accent flex items-center justify-center mb-4">
-              <Upload className="h-5 w-5" />
+            <div className={cn(
+              "h-10 w-10 rounded-full bg-accent-soft text-accent flex items-center justify-center mb-3 transition-transform duration-500",
+              uploading && "scale-110 shadow-glow"
+            )}>
+              <Upload className={cn("h-5 w-5", uploading && "animate-bounce")} />
             </div>
-            <h3 className="text-base font-semibold text-foreground">Drop a file</h3>
-            <p className="mt-1.5 text-sm text-muted-foreground mb-6">
+            <h3 className="text-sm font-semibold text-foreground">Drop a file</h3>
+            <p className="mt-1 text-[11px] text-muted-foreground mb-5">
               CSV, JSON, Parquet or Excel · up to {MAX_FILE_SIZE_MB} MB
             </p>
-            <label className="inline-flex items-center gap-2 h-10 px-5 rounded-xl bg-accent text-accent-foreground text-sm font-semibold cursor-pointer hover:bg-accent/90 transition-colors shadow-sm">
+            <label className="inline-flex items-center gap-2 h-9 px-4 rounded-xl bg-accent text-accent-foreground text-sm font-semibold cursor-pointer hover:bg-accent/90 transition-colors shadow-sm active:scale-95">
               <FileText className="h-4 w-4" /> Choose file
               <input type="file" accept={ACCEPTED_TYPES} className="hidden" data-testid="file-input"
                 onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
               />
             </label>
             {uploading && (
-              <div className="mt-3 w-full max-w-xs mx-auto">
-                <div className="h-2 bg-surface rounded-full overflow-hidden border border-border">
-                  <div className="h-full bg-accent rounded-full transition-all duration-300 ease-out" style={{ width: `${uploadProgress}%` }} />
+              <div className="mt-4 w-full max-w-[180px] mx-auto animate-pop-in">
+                <div className="h-1.5 bg-surface rounded-full overflow-hidden border border-border relative">
+                  <div className="h-full bg-accent rounded-full transition-all duration-500 ease-out relative" style={{ width: `${uploadProgress}%` }}>
+                    <div className="absolute inset-0 w-full h-full animate-shimmer" style={{ backgroundSize: '200% 100%' }} />
+                  </div>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1 tabular-nums font-mono">{uploadProgress}%</p>
+                <div className="flex justify-between items-center mt-1.5 px-0.5">
+                  <p className="text-[10px] text-muted-foreground tabular-nums font-mono">{uploadProgress}%</p>
+                  <p className="text-[10px] text-accent font-bold animate-pulse-soft truncate max-w-[110px]">{uploadStage}</p>
+                </div>
               </div>
             )}
           </div>
 
-          <div className="card-soft p-5 col-span-1 lg:col-span-2">
+
+          {/* Connect Card */}
+          <SourceConnect onComplete={(id) => setSelectedId(id)} />
+
+          {/* Demo Card */}
+          <div className="card-soft p-5">
             <div className="flex items-center gap-2 mb-4">
               <div className="h-8 w-8 rounded-md bg-accent-soft text-accent flex items-center justify-center">
                 <Sparkles className="h-4 w-4" />
               </div>
               <div>
                 <h3 className="text-sm font-semibold text-foreground">Demo catalogue</h3>
-                <p className="text-xs text-muted-foreground">Generate realistic synthetic data in one click.</p>
+                <p className="text-xs text-muted-foreground">Generate realistic synthetic data.</p>
               </div>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-2">
               {(catalogue.length ? catalogue : []).map((d) => (
                 <button key={d.kind}
                   disabled={!!busyKind}
                   onClick={() => seedDemo(d.kind)}
                   data-testid={`demo-${d.kind}`}
                   className={cn(
-                    "text-left rounded-lg border border-border bg-card px-3 py-2.5 transition-colors",
+                    "text-left rounded-lg border border-border bg-card px-3 py-2 transition-colors",
                     busyKind === d.kind ? "ring-2 ring-accent" : "hover:border-accent/50 hover:bg-accent/5",
                   )}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-foreground capitalize">{d.label}</span>
-                    {busyKind === d.kind && <span className="text-[10px] text-accent">loading…</span>}
+                    <span className="text-[12px] font-medium text-foreground capitalize">{d.label}</span>
+                    {busyKind === d.kind && (
+                      <span className="text-[10px] text-accent font-medium animate-pulse">
+                        {busyStage || "loading…"}
+                      </span>
+                    )}
                   </div>
-                  <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">{d.description}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1">{d.description}</p>
                 </button>
               ))}
             </div>

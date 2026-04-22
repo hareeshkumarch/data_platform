@@ -43,7 +43,7 @@ def infer_column_type(series: pd.Series) -> str:
     if series.dtype == object:
         sample = series.dropna().head(50)
         try:
-            pd.to_datetime(sample, infer_datetime_format=True)
+            pd.to_datetime(sample)
             return "datetime"
         except Exception:
             pass
@@ -274,19 +274,54 @@ def sanitize_rows(records: list) -> list:
     for row in records:
         clean = {}
         for k, v in row.items():
-            if isinstance(v, (np.integer,)):
-                clean[k] = int(v)
-            elif isinstance(v, (np.floating,)):
-                clean[k] = None if (np.isnan(v) or np.isinf(v)) else float(v)
-            elif isinstance(v, (np.ndarray,)):
-                clean[k] = v.tolist()
-            else:
-                try:
-                    clean[k] = None if pd.isna(v) else v
-                except Exception:
-                    clean[k] = v
+            clean[k] = _sanitize_value(v)
         result.append(clean)
     return result
+
+
+def _sanitize_value(v: Any) -> Any:
+    """Convert a single value to a JSON-safe primitive."""
+    if v is None:
+        return None
+    # numpy scalars
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        return None if (np.isnan(v) or np.isinf(v)) else float(v)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, (np.ndarray,)):
+        return [_sanitize_value(x) for x in v.tolist()]
+    # numpy datetime / timedelta
+    if isinstance(v, (np.datetime64, np.timedelta64)):
+        return str(v)
+    # numpy dtype descriptors (e.g. DateTime64DType) — not data, just type info
+    if isinstance(v, np.dtype):
+        return str(v)
+    if hasattr(np, 'dtypes') and isinstance(v, type) and issubclass(type(v), type):
+        return str(v)
+    # pandas Timestamp / Timedelta / NaT
+    if isinstance(v, pd.Timestamp):
+        return v.isoformat() if not pd.isna(v) else None
+    if isinstance(v, pd.Timedelta):
+        return str(v)
+    # Catch-all for any remaining numpy dtype descriptor objects
+    # These are objects like numpy.dtypes.DateTime64DType that lack __dict__
+    type_name = type(v).__module__
+    if type_name.startswith('numpy.dtypes') or type_name.startswith('numpy'):
+        try:
+            # Last-resort: if it's some exotic numpy object, stringify it
+            if not isinstance(v, (int, float, str, bool, list, dict)):
+                return str(v)
+        except Exception:
+            return str(v)
+    # pandas NA check
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    return v
 
 
 def _safe(v: Any) -> Any:
@@ -321,4 +356,19 @@ def _convert(obj: Any) -> Any:
         return _convert(obj.tolist())
     if isinstance(obj, np.bool_):
         return bool(obj)
+    # numpy datetime / timedelta
+    if isinstance(obj, (np.datetime64, np.timedelta64)):
+        return str(obj)
+    # numpy dtype descriptors (DateTime64DType, etc.)
+    if isinstance(obj, np.dtype):
+        return str(obj)
+    # pandas types
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat() if not pd.isna(obj) else None
+    if isinstance(obj, pd.Timedelta):
+        return str(obj)
+    # Catch exotic numpy descriptor objects that lack __dict__
+    type_mod = getattr(type(obj), '__module__', '')
+    if type_mod.startswith('numpy') and not isinstance(obj, (int, float, str, bool)):
+        return str(obj)
     return obj

@@ -25,3 +25,6 @@ litellm>=1.57.0,<2
 
 # Vector search (RAG)
 faiss-cpu>=1.7.4
+
+# PDF export
+reportlab>=4.0.0

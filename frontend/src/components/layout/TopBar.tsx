@@ -47,7 +47,7 @@ export const TopBar = ({
   const displayName = useMemo(() => {
     if (!dataset || dataset === "Select dataset") return "Select dataset";
     const found = Array.isArray(datasets) ? datasets.find((d) => d && (d.id || d.dataset_id) === dataset) : null;
-    const name = found?.name || found?.filename || (typeof dataset === "string" ? dataset.slice(0, 8) + "…" : "Dataset");
+    const name = found?.filename || found?.name || (typeof dataset === "string" ? dataset.slice(0, 8) + "…" : "Dataset");
     return name;
   }, [dataset, datasets]);
 
@@ -119,7 +119,7 @@ export const TopBar = ({
                   >
                     <div className="flex items-center gap-2 w-full">
                       <Database className="h-3.5 w-3.5 text-accent" />
-                      <span className="text-xs font-medium truncate">{d?.name || d?.filename || d?.id}</span>
+                      <span className="text-xs font-medium truncate">{d?.filename || d?.name || d?.id}</span>
                     </div>
                     <span className="text-[10px] text-muted-foreground font-mono opacity-60">ID: {d?.id || d?.dataset_id}</span>
                   </DropdownMenuItem>

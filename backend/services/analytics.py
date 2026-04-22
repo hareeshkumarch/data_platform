@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import math
 
 import numpy as np
 import pandas as pd
@@ -362,6 +363,373 @@ class AdvancedAnalytics:
             return result
         except Exception as e:
             return {"error": str(e)}
+
+    # ── Distribution Analysis ─────────────────────────────────────────────────
+
+    @staticmethod
+    def distribution_analysis(
+        df: pd.DataFrame, numeric_cols: List[str]
+    ) -> Dict[str, Any]:
+        """Histogram bins, normality tests (Shapiro-Wilk), skew/kurtosis badges."""
+        from scipy import stats as sp
+
+        results = []
+        for col in numeric_cols[:12]:
+            if col not in df.columns:
+                continue
+            s = df[col].dropna()
+            if len(s) < 8:
+                continue
+            # Histogram with Freedman-Diaconis bins
+            try:
+                counts, edges = np.histogram(s, bins="fd")
+                if len(counts) > 40:
+                    counts, edges = np.histogram(s, bins=40)
+            except Exception:
+                counts, edges = np.histogram(s, bins=20)
+
+            bins = [
+                {"lo": round(float(edges[i]), 4), "hi": round(float(edges[i + 1]), 4), "count": int(counts[i])}
+                for i in range(len(counts))
+            ]
+
+            # Normality
+            sample = s.sample(min(len(s), 5000), random_state=42) if len(s) > 5000 else s
+            try:
+                shapiro_stat, shapiro_p = sp.shapiro(sample)
+            except Exception:
+                shapiro_stat, shapiro_p = 0.0, 0.0
+
+            skew_val = float(sp.skew(s))
+            kurt_val = float(sp.kurtosis(s))
+            cv = abs(float(s.std()) / float(s.mean())) * 100 if s.mean() != 0 else 0
+
+            results.append({
+                "column": col,
+                "bins": bins,
+                "mean": round(float(s.mean()), 4),
+                "median": round(float(s.median()), 4),
+                "std": round(float(s.std()), 4),
+                "skewness": round(skew_val, 4),
+                "kurtosis": round(kurt_val, 4),
+                "cv_pct": round(cv, 2),
+                "shapiro_stat": round(float(shapiro_stat), 4),
+                "shapiro_p": round(float(shapiro_p), 6),
+                "is_normal": bool(shapiro_p > 0.05),
+                "skew_label": "right-skewed" if skew_val > 0.5 else "left-skewed" if skew_val < -0.5 else "symmetric",
+                "kurt_label": "heavy-tailed" if kurt_val > 1 else "light-tailed" if kurt_val < -1 else "mesokurtic",
+                "n": int(len(s)),
+                "p5": round(float(s.quantile(0.05)), 4),
+                "p95": round(float(s.quantile(0.95)), 4),
+            })
+        return {"distributions": results}
+
+    # ── Data Quality Score ────────────────────────────────────────────────────
+
+    @staticmethod
+    def data_quality_score(df: pd.DataFrame, schema_cols: List[Dict]) -> Dict[str, Any]:
+        """Multi-factor weighted quality score with per-column breakdown & auto-fix suggestions."""
+        total_cells = df.size or 1
+        missing_cells = int(df.isna().sum().sum())
+        dup_rows = int(df.duplicated().sum())
+        row_count = len(df)
+
+        completeness = (1 - missing_cells / total_cells) * 100
+        uniqueness = (1 - dup_rows / max(row_count, 1)) * 100
+
+        # Consistency: check mixed types in object cols
+        mixed_type_cols = 0
+        for c in df.select_dtypes("object").columns:
+            types_found = df[c].dropna().apply(type).nunique()
+            if types_found > 1:
+                mixed_type_cols += 1
+        consistency = (1 - mixed_type_cols / max(len(df.columns), 1)) * 100
+
+        # Validity: check for constant or near-zero-variance cols
+        invalid_cols = 0
+        for c in df.columns:
+            if df[c].nunique() <= 1:
+                invalid_cols += 1
+        validity = (1 - invalid_cols / max(len(df.columns), 1)) * 100
+
+        overall = round(completeness * 0.35 + uniqueness * 0.25 + consistency * 0.20 + validity * 0.20, 1)
+
+        # Per-column issues
+        col_issues: List[Dict[str, Any]] = []
+        suggestions: List[Dict[str, str]] = []
+        for col_meta in schema_cols:
+            col = col_meta.get("name", "")
+            if col not in df.columns:
+                continue
+            s = df[col]
+            null_pct = round(s.isna().mean() * 100, 2)
+            issues = []
+            if null_pct > 30:
+                issues.append("high_missing")
+                suggestions.append({"column": col, "action": "drop_column", "reason": f"{null_pct}% missing — consider dropping"})
+            elif null_pct > 5:
+                issues.append("moderate_missing")
+                fill = "median" if col_meta.get("inferred_type") == "numeric" else "mode"
+                suggestions.append({"column": col, "action": f"fill_{fill}", "reason": f"{null_pct}% missing — impute with {fill}"})
+            if s.nunique() <= 1:
+                issues.append("constant")
+                suggestions.append({"column": col, "action": "drop_column", "reason": "Column is constant — adds no information"})
+            col_issues.append({"column": col, "null_pct": null_pct, "issues": issues})
+
+        if dup_rows > 0:
+            suggestions.append({"column": "_rows_", "action": "dedup", "reason": f"{dup_rows} duplicate rows found"})
+
+        grade = "A" if overall >= 90 else "B" if overall >= 75 else "C" if overall >= 60 else "D" if overall >= 40 else "F"
+
+        return {
+            "overall_score": overall,
+            "grade": grade,
+            "completeness": round(completeness, 1),
+            "uniqueness": round(uniqueness, 1),
+            "consistency": round(consistency, 1),
+            "validity": round(validity, 1),
+            "missing_cells": missing_cells,
+            "duplicate_rows": dup_rows,
+            "total_cells": total_cells,
+            "column_issues": col_issues,
+            "suggestions": suggestions[:12],
+        }
+
+    # ── Column Relationship Discovery ─────────────────────────────────────────
+
+    @staticmethod
+    def column_relationships(df: pd.DataFrame) -> Dict[str, Any]:
+        """Auto-detect foreign keys, functional dependencies, and join candidates."""
+        relationships: List[Dict[str, Any]] = []
+        cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+        num_cols = df.select_dtypes(include=np.number).columns.tolist()
+
+        # FK detection: if col A's unique values are a subset of col B
+        for i, a in enumerate(cat_cols):
+            ua = set(df[a].dropna().unique())
+            if len(ua) < 2 or len(ua) > len(df) * 0.8:
+                continue
+            for b in cat_cols[i + 1:]:
+                ub = set(df[b].dropna().unique())
+                if len(ub) < 2:
+                    continue
+                overlap = len(ua & ub) / max(len(ua | ub), 1)
+                if overlap > 0.6:
+                    relationships.append({
+                        "col_a": a, "col_b": b, "type": "categorical_overlap",
+                        "overlap_pct": round(overlap * 100, 1),
+                        "hint": "Possible join key or FK relationship",
+                    })
+
+        # Functional dependency: if knowing col A determines col B
+        for a in cat_cols[:6]:
+            for b in cat_cols[:6]:
+                if a == b:
+                    continue
+                try:
+                    groups = df.groupby(a)[b].nunique()
+                    if groups.max() == 1 and len(groups) > 2:
+                        relationships.append({
+                            "col_a": a, "col_b": b, "type": "functional_dependency",
+                            "overlap_pct": 100.0,
+                            "hint": f"{a} → {b} (each {a} value maps to exactly one {b})",
+                        })
+                except Exception:
+                    pass
+
+        # Numeric ratio detection
+        for i, a in enumerate(num_cols[:8]):
+            sa = df[a].dropna()
+            if len(sa) < 10:
+                continue
+            for b in num_cols[i + 1:8]:
+                sb = df[b].dropna()
+                common = df[[a, b]].dropna()
+                if len(common) < 10:
+                    continue
+                ratio = common[a] / common[b].replace(0, np.nan)
+                ratio = ratio.dropna()
+                if len(ratio) > 5 and ratio.std() / abs(ratio.mean() + 1e-10) < 0.05:
+                    relationships.append({
+                        "col_a": a, "col_b": b, "type": "constant_ratio",
+                        "overlap_pct": round(ratio.mean(), 4),
+                        "hint": f"{a} ≈ {ratio.mean():.2f} × {b} (nearly constant ratio)",
+                    })
+
+        return {"relationships": relationships[:20]}
+
+    # ── Time-Series Decomposition (STL-like) ──────────────────────────────────
+
+    @staticmethod
+    def ts_decomposition(
+        df: pd.DataFrame, date_col: str, value_col: str, period: int = 7
+    ) -> Dict[str, Any]:
+        """Additive decomposition into trend + seasonal + residual."""
+        try:
+            ts = df[[date_col, value_col]].copy()
+            ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
+            ts = ts.dropna().sort_values(date_col)
+            ts_series = ts.set_index(date_col)[value_col]
+
+            if len(ts_series) < period * 2:
+                return {"error": f"Need at least {period * 2} data points for decomposition."}
+
+            trend = ts_series.rolling(window=period, center=True, min_periods=1).mean()
+            detrended = ts_series - trend
+            seasonal = detrended.groupby(np.arange(len(detrended)) % period).transform("mean")
+            residual = ts_series - trend - seasonal
+
+            # Seasonality strength
+            var_resid = residual.dropna().var()
+            var_deseason = (ts_series - seasonal).dropna().var()
+            seasonality_strength = round(max(0, 1 - var_resid / (var_deseason + 1e-10)), 3)
+
+            # Trend strength
+            var_orig = ts_series.dropna().var()
+            trend_strength = round(max(0, 1 - var_resid / (var_orig + 1e-10)), 3)
+
+            dates = ts_series.index.astype(str).tolist()
+            return {
+                "dates": dates,
+                "observed": [_safe(v) for v in ts_series.tolist()],
+                "trend": [_safe(v) for v in trend.tolist()],
+                "seasonal": [_safe(v) for v in seasonal.tolist()],
+                "residual": [_safe(v) for v in residual.tolist()],
+                "period": period,
+                "trend_strength": trend_strength,
+                "seasonality_strength": seasonality_strength,
+                "data_points": len(ts_series),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    # ── Drift Detection ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def drift_detection(
+        df: pd.DataFrame, numeric_cols: List[str], split_ratio: float = 0.5
+    ) -> Dict[str, Any]:
+        """Split data in half and compare distributions using KS-test & PSI."""
+        mid = int(len(df) * split_ratio)
+        if mid < 10 or (len(df) - mid) < 10:
+            return {"error": "Not enough rows for drift detection (need 20+)."}
+
+        df_a, df_b = df.iloc[:mid], df.iloc[mid:]
+        results = []
+
+        for col in numeric_cols[:12]:
+            if col not in df.columns:
+                continue
+            sa = df_a[col].dropna()
+            sb = df_b[col].dropna()
+            if len(sa) < 5 or len(sb) < 5:
+                continue
+
+            from scipy import stats as sp
+            ks_stat, ks_p = sp.ks_2samp(sa, sb)
+
+            # Population Stability Index (PSI)
+            try:
+                bins = np.linspace(min(sa.min(), sb.min()), max(sa.max(), sb.max()), 11)
+                ha = np.histogram(sa, bins=bins)[0] / len(sa) + 1e-6
+                hb = np.histogram(sb, bins=bins)[0] / len(sb) + 1e-6
+                psi = float(np.sum((ha - hb) * np.log(ha / hb)))
+            except Exception:
+                psi = 0.0
+
+            drift_level = "high" if psi > 0.25 else "moderate" if psi > 0.1 else "low"
+
+            results.append({
+                "column": col,
+                "ks_statistic": round(float(ks_stat), 4),
+                "ks_p_value": round(float(ks_p), 6),
+                "ks_significant": bool(ks_p < 0.05),
+                "psi": round(psi, 4),
+                "drift_level": drift_level,
+                "mean_a": round(float(sa.mean()), 4),
+                "mean_b": round(float(sb.mean()), 4),
+                "std_a": round(float(sa.std()), 4),
+                "std_b": round(float(sb.std()), 4),
+            })
+
+        drifted = sum(1 for r in results if r["drift_level"] != "low")
+        return {
+            "split_at_row": mid,
+            "total_rows": len(df),
+            "columns_analyzed": len(results),
+            "columns_drifted": drifted,
+            "drift_results": results,
+        }
+
+    # ── Feature Importance ────────────────────────────────────────────────────
+
+    @staticmethod
+    def feature_importance(
+        df: pd.DataFrame, target_col: str, numeric_cols: List[str]
+    ) -> Dict[str, Any]:
+        """Rank features by mutual information and correlation magnitude."""
+        if target_col not in df.columns:
+            return {"error": f"Target column '{target_col}' not found."}
+
+        features = [c for c in numeric_cols if c != target_col and c in df.columns]
+        if not features:
+            return {"error": "No feature columns available."}
+
+        sub = df[[target_col] + features].dropna()
+        if len(sub) < 20:
+            return {"error": "Not enough complete rows for feature importance."}
+
+        results = []
+        for feat in features:
+            x = sub[feat].values
+            y = sub[target_col].values
+
+            # Correlation-based importance
+            try:
+                from scipy import stats as sp
+                corr, _ = sp.pearsonr(x, y)
+                corr_importance = abs(float(corr))
+            except Exception:
+                corr_importance = 0.0
+
+            # Mutual information approximation (binned)
+            try:
+                n_bins = min(20, max(5, int(len(x) ** 0.4)))
+                x_binned = np.digitize(x, np.linspace(x.min(), x.max(), n_bins))
+                y_binned = np.digitize(y, np.linspace(y.min(), y.max(), n_bins))
+                contingency = np.histogram2d(x_binned, y_binned, bins=n_bins)[0]
+                contingency = contingency / contingency.sum()
+                px = contingency.sum(axis=1)
+                py = contingency.sum(axis=0)
+                mi = 0.0
+                for i in range(contingency.shape[0]):
+                    for j in range(contingency.shape[1]):
+                        if contingency[i, j] > 0 and px[i] > 0 and py[j] > 0:
+                            mi += contingency[i, j] * math.log2(contingency[i, j] / (px[i] * py[j]))
+                mi_score = max(0.0, mi)
+            except Exception:
+                mi_score = 0.0
+
+            combined = round(corr_importance * 0.5 + min(mi_score, 1.0) * 0.5, 4)
+            results.append({
+                "feature": feat,
+                "correlation": round(corr_importance, 4),
+                "mutual_info": round(mi_score, 4),
+                "importance": combined,
+            })
+
+        results.sort(key=lambda r: r["importance"], reverse=True)
+
+        # Normalize to 0-100
+        max_imp = results[0]["importance"] if results else 1.0
+        for r in results:
+            r["importance_pct"] = round(r["importance"] / (max_imp or 1) * 100, 1)
+
+        return {
+            "target": target_col,
+            "features": results,
+            "top_feature": results[0]["feature"] if results else None,
+        }
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

@@ -99,8 +99,8 @@ export async function apiFetch<T = unknown>(
 export async function pollTask<T = unknown>(
   taskId: string,
   onProgress?: (progress: number, stage?: string) => void,
-  intervalMs = 1500,
-  maxAttempts = 60,
+  intervalMs = 800,
+  maxAttempts = 100,
 ): Promise<T> {
   for (let i = 0; i < maxAttempts; i += 1) {
     const status = await apiFetch<TaskResult>(`/task/${taskId}`);

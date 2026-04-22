@@ -351,6 +351,115 @@ async def segmentation(
 
 
 # ---------------------------------------------------------------------------
+# NEW: Distribution Analysis
+# ---------------------------------------------------------------------------
+
+
+@advanced_router.get("/analytics/{dataset_id}/distributions")
+async def distributions(
+    dataset_id: str,
+    storage: StorageService = Depends(_storage),
+) -> Dict[str, Any]:
+    df = await _load_df(dataset_id, storage)
+    numeric = df.select_dtypes(include=np.number).columns.tolist()
+    return AdvancedAnalytics.distribution_analysis(df, numeric)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Data Quality Score
+# ---------------------------------------------------------------------------
+
+
+@advanced_router.get("/analytics/{dataset_id}/quality")
+async def quality_score(
+    dataset_id: str,
+    storage: StorageService = Depends(_storage),
+    cache: CacheService = Depends(_cache),
+) -> Dict[str, Any]:
+    df = await _load_df(dataset_id, storage)
+    schema = await cache.get_schema(dataset_id)
+    schema_cols = schema.get("columns", []) if schema else []
+    return AdvancedAnalytics.data_quality_score(df, schema_cols)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Column Relationships
+# ---------------------------------------------------------------------------
+
+
+@advanced_router.get("/analytics/{dataset_id}/relationships")
+async def relationships(
+    dataset_id: str,
+    storage: StorageService = Depends(_storage),
+) -> Dict[str, Any]:
+    df = await _load_df(dataset_id, storage)
+    return AdvancedAnalytics.column_relationships(df)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Time-Series Decomposition
+# ---------------------------------------------------------------------------
+
+
+@advanced_router.get("/analytics/{dataset_id}/decomposition")
+async def decomposition(
+    dataset_id: str,
+    column: Optional[str] = None,
+    period: int = 7,
+    storage: StorageService = Depends(_storage),
+) -> Dict[str, Any]:
+    df = await _load_df(dataset_id, storage)
+    date_cols = [
+        c for c in df.columns
+        if "date" in c.lower() or "ts" in c.lower() or "time" in c.lower()
+    ]
+    if not date_cols:
+        raise HTTPException(400, "No date/time column found in dataset.")
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+    value_col = column if column and column in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+    if not value_col:
+        raise HTTPException(400, "No numeric column available for decomposition.")
+    return AdvancedAnalytics.ts_decomposition(df, date_cols[0], value_col, period)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Drift Detection
+# ---------------------------------------------------------------------------
+
+
+@advanced_router.get("/analytics/{dataset_id}/drift")
+async def drift_detection(
+    dataset_id: str,
+    storage: StorageService = Depends(_storage),
+) -> Dict[str, Any]:
+    df = await _load_df(dataset_id, storage)
+    numeric = df.select_dtypes(include=np.number).columns.tolist()
+    return AdvancedAnalytics.drift_detection(df, numeric)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Feature Importance
+# ---------------------------------------------------------------------------
+
+
+class FeatureImportanceRequest(BaseModel):
+    target_col: str
+
+
+@advanced_router.post("/analytics/{dataset_id}/importance")
+async def feature_importance(
+    dataset_id: str,
+    body: FeatureImportanceRequest,
+    storage: StorageService = Depends(_storage),
+) -> Dict[str, Any]:
+    df = await _load_df(dataset_id, storage)
+    numeric = df.select_dtypes(include=np.number).columns.tolist()
+    if body.target_col not in df.columns:
+        raise HTTPException(400, f"Unknown target column: {body.target_col}")
+    return AdvancedAnalytics.feature_importance(df, body.target_col, numeric)
+
+
+# ---------------------------------------------------------------------------
 # Data cleaning
 # ---------------------------------------------------------------------------
 

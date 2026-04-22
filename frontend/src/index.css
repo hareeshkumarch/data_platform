@@ -216,6 +216,9 @@
     }
     .hover-lift:hover { transform: none; }
   }
+
+  .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
 }
 
 @keyframes fade-in { from {opacity:0} to {opacity:1} }
