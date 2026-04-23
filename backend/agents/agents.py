@@ -59,50 +59,18 @@ def _rehydrate_dataset(dataset_id: str):
     from backend.services.storage_service import StorageService  # local import to avoid cycle
 
     storage = StorageService()
-    file_path = storage.get_file_path(dataset_id)
-    if not file_path or not file_path.exists():
+    try:
+        df = storage.load_dataframe_sync(dataset_id)
+    except FileNotFoundError:
         return None
-
-    ext = file_path.suffix.lower()
-    if ext == ".csv":
-        df = pd.read_csv(file_path)
-    elif ext == ".json":
-        df = pd.read_json(file_path)
-    elif ext in (".xlsx", ".xls"):
-        df = pd.read_excel(file_path)
-    elif ext == ".parquet":
-        df = pd.read_parquet(file_path)
-    else:
-        df = pd.read_csv(file_path)
-
-    cols: List[Dict[str, Any]] = []
-    for c in df.columns:
-        dtype = str(df[c].dtype)
-        if "int" in dtype or "float" in dtype:
-            inferred = "numeric"
-        elif "datetime" in dtype:
-            inferred = "datetime"
-        elif "bool" in dtype:
-            inferred = "boolean"
-        else:
-            inferred = "categorical"
-        cols.append(
-            {
-                "name": c,
-                "dtype": dtype,
-                "inferred_type": inferred,
-                "null_pct": round(float(df[c].isnull().mean() * 100), 2),
-                "unique_count": int(df[c].nunique()),
-            }
-        )
 
     record = storage.get_dataset_record(dataset_id) or {}
     schema = {
         "dataset_id": dataset_id,
-        "name": record.get("filename", file_path.name),
+        "name": record.get("filename", record.get("name") or dataset_id),
         "row_count": int(len(df)),
         "col_count": int(len(df.columns)),
-        "columns": cols,
+        "columns": infer_schema(df),
     }
     # Use a larger sample than the in-HTTP-path rehydrator so QueryAgent results
     # are meaningful (200 rows makes aggregate answers wildly wrong).

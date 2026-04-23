@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.api.middleware.rate_limit import rate_limit_middleware
+from backend.api.routes.analytics import analytics_router
 from backend.api.routes.advanced import advanced_router
 from backend.api.routes.cleaning import cleaning_router
 from backend.api.routes.conversations import conversations_router
@@ -118,6 +119,7 @@ async def global_error(request: Request, exc: Exception):
 app.include_router(router, prefix=settings.API_PREFIX)
 app.include_router(warehouse_router, prefix=settings.API_PREFIX)
 app.include_router(conversations_router, prefix=settings.API_PREFIX)
+app.include_router(analytics_router, prefix=settings.API_PREFIX)
 app.include_router(advanced_router, prefix=settings.API_PREFIX)
 app.include_router(cleaning_router, prefix=settings.API_PREFIX)
 register_websockets(app)

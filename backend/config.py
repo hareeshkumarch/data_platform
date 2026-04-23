@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     ENABLE_PROMETHEUS: bool = False
     PROMETHEUS_PORT: int = 9090
 
+    # Async processing
+    ANALYTICS_THREAD_POOL_SIZE: int = 4
+    ANALYTICS_CACHE_TTL: int = 600
+
     model_config = SettingsConfigDict(
         env_file=".env", case_sensitive=True, extra="ignore"
     )

@@ -1,14 +1,14 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { apiFetch } from "@/lib/api-client";
 import { useQuery } from "@tanstack/react-query";
 import { Dataset } from "@/lib/types";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Database, FileBarChart, GitBranch, Copy, CheckCircle2,
   Eye, Layers, BarChart3, LineChart, PieChart,
   Table2, Gauge, ArrowUpDown, Calendar, Hash, Type,
-  Sparkles, Code2, Loader2, ChevronDown,
+  Sparkles, Code2, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -46,8 +46,6 @@ const PowerBI = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("dax");
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [expandedMeasure, setExpandedMeasure] = useState<string | null>(null);
-  const [filterType, setFilterType] = useState("all");
 
   // Dataset list
   const { data: datasetsResp } = useQuery({
@@ -56,10 +54,11 @@ const PowerBI = () => {
   });
   const datasets = datasetsResp?.datasets ?? [];
 
-  // Auto-select first
-  if (!selectedId && datasets.length > 0) {
-    setSelectedId(datasets[0].id);
-  }
+  useEffect(() => {
+    if (!selectedId && datasets.length > 0) {
+      setSelectedId(datasets[0].id);
+    }
+  }, [selectedId, datasets]);
 
   // DAX measures
   const { data: daxData, isLoading: daxLoading } = useQuery({
@@ -85,14 +84,6 @@ const PowerBI = () => {
     retry: false,
   });
 
-  // Advanced metrics
-  const { data: metricsData } = useQuery({
-    queryKey: ["pbi-metrics", selectedId],
-    queryFn: () => apiFetch<any>(`/analytics/${selectedId}/advanced-metrics`),
-    enabled: !!selectedId && activeTab === "metrics",
-    retry: false,
-  });
-
   const copyToClipboard = useCallback((text: string, id: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
@@ -100,23 +91,16 @@ const PowerBI = () => {
     setTimeout(() => setCopiedId(null), 2000);
   }, []);
 
+  const measures = daxData?.measures ?? [];
+
   const copyAllDax = useCallback(() => {
-    if (!daxData?.measures) return;
-    const text = daxData.measures.map((m: any) => `${m.name} = ${m.expression}`).join("\n\n");
+    if (measures.length === 0) return;
+    const text = measures.map((m: any) => `${m.name} = ${m.expression}`).join("\n\n");
     navigator.clipboard.writeText(text);
-    toast.success(`Copied ${daxData.measures.length} measures`);
-  }, [daxData]);
-
-  const filteredMeasures = useMemo(() => {
-    if (!daxData?.measures) return [];
-    if (filterType === "all") return daxData.measures;
-    return daxData.measures.filter((m: any) => m.type === filterType);
-  }, [daxData, filterType]);
-
-  const measureTypes = useMemo(() => {
-    if (!daxData?.measures) return [];
-    return ["all", ...new Set(daxData.measures.map((m: any) => m.type))] as string[];
-  }, [daxData]);
+    toast.success(`Copied ${measures.length} measures`);
+    setCopiedId("copy-all");
+    setTimeout(() => setCopiedId(null), 2000);
+  }, [measures]);
 
   return (
     <AppShell title="Power BI" subtitle="DAX measures, M Query, and data model generation" status="ready">
@@ -166,9 +150,6 @@ const PowerBI = () => {
             <TabsTrigger value="model" className="gap-1.5">
               <GitBranch className="h-3.5 w-3.5" /> Data Model
             </TabsTrigger>
-            <TabsTrigger value="metrics" className="gap-1.5">
-              <Gauge className="h-3.5 w-3.5" /> Advanced Metrics
-            </TabsTrigger>
           </TabsList>
 
           {/* DAX Measures */}
@@ -178,90 +159,67 @@ const PowerBI = () => {
             ) : daxData?.measures ? (
               <>
                 {/* Summary bar */}
-                <Card className="p-4 flex flex-wrap items-center gap-4">
-                  <div className="text-sm">
-                    <span className="font-bold text-foreground text-lg">{daxData.total_measures}</span>
-                    <span className="text-muted-foreground ml-1.5">measures generated for</span>
-                    <span className="font-mono text-accent ml-1.5">{daxData.table_name}</span>
+                <Card className="p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1">
+                    <span className="text-sm text-muted-foreground">Generated for</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-foreground text-lg tabular-nums">{daxData.total_measures}</span>
+                      <span className="text-sm text-muted-foreground">measures in</span>
+                      <span className="font-mono text-accent">{daxData.table_name}</span>
+                    </div>
                   </div>
-                  <div className="flex-1" />
-                  <div className="flex items-center gap-1 p-0.5 rounded-lg bg-surface border border-border">
-                    {measureTypes.map((t: string) => (
-                      <button
-                        key={t}
-                        onClick={() => setFilterType(t)}
-                        className={cn(
-                          "px-2 py-1 rounded-md text-[10px] font-medium transition-colors capitalize",
-                          filterType === t ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
-                        )}
-                      >
-                        {t.replace("_", " ")}
-                      </button>
-                    ))}
-                  </div>
-                  <Button variant="outline" size="sm" onClick={copyAllDax}>
-                    <Copy className="h-3.5 w-3.5" /> Copy All
+                  {Array.isArray(daxData.categories) && daxData.categories.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {daxData.categories.map((c: string) => (
+                        <Badge key={c} variant="outline" className="text-[10px] font-mono uppercase tracking-wide">
+                          {c}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={copyAllDax}
+                    disabled={measures.length === 0}
+                    className="gap-2"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {copiedId === "copy-all" ? "Copied" : "Copy all"}
                   </Button>
                 </Card>
 
                 {/* Measures list */}
-                <div className="space-y-2">
-                  {filteredMeasures.map((m: any, i: number) => (
-                    <motion.div
-                      key={m.name + i}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.03, duration: 0.25 }}
-                    >
-                      <Card
-                        className={cn(
-                          "p-0 overflow-hidden transition-all cursor-pointer",
-                          expandedMeasure === m.name && "ring-1 ring-accent/40"
+                <div className="space-y-3">
+                  {measures.map((m: any, i: number) => (
+                    <Card key={m.name + i} className="p-4 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <FileBarChart className="h-4 w-4 text-accent" />
+                        <span className="text-sm font-semibold text-foreground">{m.name}</span>
+                        {m.type && (
+                          <Badge variant="outline" className={cn("text-[9px] capitalize", MEASURE_TYPE_COLORS[m.type] || "")}>
+                            {m.type.replace("_", " ")}
+                          </Badge>
                         )}
-                      >
-                        <button
-                          onClick={() => setExpandedMeasure(expandedMeasure === m.name ? null : m.name)}
-                          className="w-full flex items-center gap-3 p-3 text-left hover:bg-surface/40 transition-colors"
+                        {m.column && m.column !== "_table_" && (
+                          <span className="text-[10px] text-muted-foreground font-mono">{m.column}</span>
+                        )}
+                      </div>
+                      <pre className="p-3 rounded-lg bg-surface/60 border border-border/40 text-[12px] font-mono text-foreground whitespace-pre-wrap leading-relaxed">
+                        {m.name} = {m.expression}
+                      </pre>
+                      <div className="flex justify-end">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-2"
+                          onClick={() => copyToClipboard(`${m.name} = ${m.expression}`, m.name)}
                         >
-                          <FileBarChart className="h-4 w-4 text-accent shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[13px] font-semibold text-foreground">{m.name}</span>
-                              <Badge variant="outline" className={cn("text-[9px] capitalize", MEASURE_TYPE_COLORS[m.type] || "")}>
-                                {m.type?.replace("_", " ")}
-                              </Badge>
-                              {m.column && m.column !== "_table_" && (
-                                <span className="text-[10px] text-muted-foreground font-mono">{m.column}</span>
-                              )}
-                            </div>
-                          </div>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); copyToClipboard(`${m.name} = ${m.expression}`, m.name); }}
-                            className="h-7 w-7 rounded-md flex items-center justify-center hover:bg-surface transition-colors shrink-0"
-                          >
-                            {copiedId === m.name ? <CheckCircle2 className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5 text-muted-foreground" />}
-                          </button>
-                          <ChevronDown className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform", expandedMeasure === m.name && "rotate-180")} />
-                        </button>
-
-                        <AnimatePresence>
-                          {expandedMeasure === m.name && (
-                            <motion.div
-                              initial={{ height: 0 }}
-                              animate={{ height: "auto" }}
-                              exit={{ height: 0 }}
-                              className="overflow-hidden"
-                            >
-                              <div className="px-3 pb-3 border-t border-border/40">
-                                <pre className="mt-2 p-3 rounded-lg bg-surface/50 text-[12px] font-mono text-foreground whitespace-pre-wrap leading-relaxed">
-                                  {m.name} = {m.expression}
-                                </pre>
-                              </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </Card>
-                    </motion.div>
+                          {copiedId === m.name ? <CheckCircle2 className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5 text-muted-foreground" />}
+                          {copiedId === m.name ? "Copied" : "Copy"}
+                        </Button>
+                      </div>
+                    </Card>
                   ))}
                 </div>
               </>
@@ -440,88 +398,7 @@ const PowerBI = () => {
             )}
           </TabsContent>
 
-          {/* Advanced Metrics */}
-          <TabsContent value="metrics" className="space-y-4 mt-4">
-            {metricsData?.columns?.length > 0 ? (
-              <>
-                {/* Summary */}
-                <Card className="p-5">
-                  <h3 className="text-sm font-semibold text-foreground mb-3">Dataset Summary</h3>
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                    {[
-                      { l: "Total Rows", v: metricsData.summary?.total_rows?.toLocaleString() },
-                      { l: "Total Columns", v: metricsData.summary?.total_columns },
-                      { l: "Completeness", v: `${metricsData.summary?.completeness_pct?.toFixed(1)}%` },
-                      { l: "Memory", v: `${metricsData.summary?.memory_mb?.toFixed(1)} MB` },
-                      { l: "Duplicates", v: metricsData.summary?.duplicate_rows?.toLocaleString() },
-                    ].map(m => (
-                      <div key={m.l} className="rounded-lg bg-surface/40 border border-border/40 p-3 text-center">
-                        <p className="text-[9px] text-muted-foreground uppercase tracking-wider">{m.l}</p>
-                        <p className="text-lg font-bold tabular-nums text-foreground">{m.v ?? "—"}</p>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-
-                {/* Per-column */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  {metricsData.columns.map((col: any, i: number) => (
-                    <motion.div
-                      key={col.name}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.04 }}
-                    >
-                      <Card className="p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
-                            {col.type === "numeric" ? <Hash className="h-3.5 w-3.5 text-blue-500" /> : <Type className="h-3.5 w-3.5 text-violet-500" />}
-                            <span className="text-[13px] font-semibold text-foreground">{col.name}</span>
-                          </div>
-                          <Badge variant="outline" className="text-[9px] capitalize">{col.type}</Badge>
-                        </div>
-
-                        {col.type === "numeric" ? (
-                          <div className="grid grid-cols-4 gap-2 text-center">
-                            {[
-                              { l: "Mean", v: col.mean?.toFixed(2) },
-                              { l: "Median", v: col.median?.toFixed(2) },
-                              { l: "Std", v: col.std?.toFixed(2) },
-                              { l: "CV%", v: col.cv_pct?.toFixed(1) },
-                              { l: "IQR", v: col.iqr?.toFixed(2) },
-                              { l: "Entropy", v: col.entropy?.toFixed(3) },
-                              { l: "Gini", v: col.gini?.toFixed(4) },
-                              { l: "Skewness", v: col.skewness?.toFixed(2) },
-                            ].map(s => (
-                              <div key={s.l} className="rounded bg-surface/40 p-1.5">
-                                <p className="text-[8px] text-muted-foreground uppercase">{s.l}</p>
-                                <p className="text-[11px] font-mono font-semibold text-foreground">{s.v ?? "—"}</p>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="grid grid-cols-3 gap-2 text-center">
-                            {[
-                              { l: "Unique", v: col.unique_count },
-                              { l: "Entropy", v: col.entropy?.toFixed(3) },
-                              { l: "Avg Len", v: col.avg_length?.toFixed(0) },
-                            ].map(s => (
-                              <div key={s.l} className="rounded bg-surface/40 p-1.5">
-                                <p className="text-[8px] text-muted-foreground uppercase">{s.l}</p>
-                                <p className="text-[11px] font-mono font-semibold text-foreground">{s.v ?? "—"}</p>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </Card>
-                    </motion.div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <EmptyCard message="Select a dataset to view advanced metrics" />
-            )}
-          </TabsContent>
+          {/* Advanced metrics section removed to keep Power BI page focused */}
         </Tabs>
       </div>
     </AppShell>

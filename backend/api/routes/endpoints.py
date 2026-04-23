@@ -31,6 +31,7 @@ from backend.tasks.celery_app import (
     task_report,
 )
 from backend.utils.logger import get_logger
+from backend.utils.data_utils import infer_schema
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -70,61 +71,26 @@ async def _get_df_and_schema(dataset_id: str, cache: CacheService):
     if not schema:
         # Fallback: try to re-read from disk and rebuild cache
         storage = await get_storage()
-        file_path = storage.get_file_path(dataset_id)
-        if file_path and file_path.exists():
-            try:
-                ext = file_path.suffix.lower()
-                if ext == ".csv":
-                    df = pd.read_csv(file_path)
-                elif ext == ".json":
-                    df = pd.read_json(file_path)
-                elif ext in (".xlsx", ".xls"):
-                    df = pd.read_excel(file_path)
-                elif ext == ".parquet":
-                    df = pd.read_parquet(file_path)
-                else:
-                    df = pd.read_csv(file_path)
-                # Rebuild schema and cache it
-                cols = []
-                for c in df.columns:
-                    dtype = str(df[c].dtype)
-                    if "int" in dtype or "float" in dtype:
-                        inferred = "numeric"
-                    elif "datetime" in dtype:
-                        inferred = "datetime"
-                    elif "bool" in dtype:
-                        inferred = "boolean"
-                    else:
-                        inferred = "categorical"
-                    cols.append(
-                        {
-                            "name": c,
-                            "dtype": dtype,
-                            "inferred_type": inferred,
-                            "null_pct": round(float(df[c].isnull().mean() * 100), 2),
-                            "unique_count": int(df[c].nunique()),
-                        }
-                    )
-                schema = {
-                    "dataset_id": dataset_id,
-                    "name": storage.get_dataset_record(dataset_id).get(
-                        "filename", file_path.name
-                    ),
-                    "row_count": len(df),
-                    "col_count": len(df.columns),
-                    "columns": cols,
-                }
-                await cache.set_schema(dataset_id, schema)
-                sample = df.head(200).to_dict("records")
-                await cache.set_sample(dataset_id, sample)
-                return df, schema
-            except Exception as e:
-                logger.warning(
-                    "Fallback disk read failed", dataset_id=dataset_id, error=str(e)
-                )
-        raise HTTPException(
-            404, f"Dataset '{dataset_id}' not found. Upload and ingest first."
-        )
+        try:
+            df = await storage.load_dataframe(dataset_id)
+        except FileNotFoundError:
+            return None, None
+        except ValueError:
+            logger.exception("Unsupported file type in storage", dataset_id=dataset_id)
+            return None, None
+
+        record = storage.get_dataset_record(dataset_id) or {}
+        schema = {
+            "dataset_id": dataset_id,
+            "name": record.get("filename", record.get("name") or dataset_id),
+            "row_count": len(df),
+            "col_count": len(df.columns),
+            "columns": infer_schema(df),
+        }
+        await cache.set_schema(dataset_id, schema)
+        sample = df.head(200).to_dict("records")
+        await cache.set_sample(dataset_id, sample)
+        return df, schema
     return pd.DataFrame(rows or []), schema
 
 
