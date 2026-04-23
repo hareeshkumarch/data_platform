@@ -316,6 +316,7 @@ def register_websockets(app: FastAPI) -> None:
             await websocket.send_json({"type": "stage", "stages": stages})
 
         started = time.perf_counter()
+        stage_timings: Dict[str, float] = {}
         cache, llm, vector, storage = _get_shared_services()
 
         from backend.agents.orchestrator.orchestrator_agent import OrchestratorAgent
@@ -324,9 +325,29 @@ def register_websockets(app: FastAPI) -> None:
 
         async def stage_cb(stage_info: Dict[str, Any]) -> None:
             pct = stage_info.get("progress", 0.0)
-            # Map progress 0-100 to index 0-6 (for 7 stages)
             current_idx = min(len(stages) - 1, int(pct / (100.0 / len(stages))))
+
+            # Track per-stage timing
+            stage_id = stages[current_idx]["id"]
+            if stage_id not in stage_timings:
+                stage_timings[stage_id] = time.perf_counter()
+
             await send_snapshot(current_idx, running=True)
+
+            # Send granular progress with timing
+            elapsed = round((time.perf_counter() - started) * 1000, 1)
+            try:
+                await websocket.send_json({
+                    "type": "progress",
+                    "current_stage": stage_id,
+                    "current_stage_name": stages[current_idx]["name"],
+                    "progress_pct": round(pct, 1),
+                    "elapsed_ms": elapsed,
+                    "stages_completed": current_idx,
+                    "stages_total": len(stages),
+                })
+            except Exception:
+                pass
 
         orchestrator.progress_cb = stage_cb
 
@@ -381,6 +402,13 @@ def register_websockets(app: FastAPI) -> None:
 
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
 
+            # Compute per-stage durations
+            stage_durations = {}
+            timing_entries = sorted(stage_timings.items(), key=lambda x: x[1])
+            for i, (sid, t_start) in enumerate(timing_entries):
+                t_end = timing_entries[i + 1][1] if i + 1 < len(timing_entries) else time.perf_counter()
+                stage_durations[sid] = round((t_end - t_start) * 1000, 1)
+
             await websocket.send_json(
                 {
                     "type": "complete",
@@ -389,6 +417,7 @@ def register_websockets(app: FastAPI) -> None:
                     "charts": result.data.get("visualization", {}).get("charts", []) if result.data else [],
                     "per_agent_summary": per_agent_summary,
                     "elapsed_ms": elapsed_ms,
+                    "stage_durations": stage_durations,
                     "run_id": str(uuid.uuid4()),
                 }
             )

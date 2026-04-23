@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { apiFetch } from "@/lib/api-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Dataset } from "@/lib/types";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -17,6 +18,20 @@ import {
   Sparkles,
   Wand2,
   X,
+  Mail,
+  Globe,
+  Phone,
+  DollarSign,
+  Calendar,
+  Hash,
+  Type,
+  Regex,
+  Braces,
+  Trash2,
+  ArrowRight,
+  Settings2,
+  Eraser,
+  Binary,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -728,8 +743,316 @@ const DataCleaning = () => {
             )}
           </DialogContent>
         </Dialog>
+        {/* ═══════ Semantic Operations Builder ═══════ */}
+        <SemanticOpsBuilder datasetId={selectedId} />
       </div>
     </AppShell>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Semantic Operations Builder
+// ---------------------------------------------------------------------------
+
+const SEMANTIC_OPS = [
+  { id: "validate_emails", label: "Validate Emails", icon: Mail, desc: "Flag or remove invalid email addresses", category: "validation", needsColumn: true },
+  { id: "validate_urls", label: "Validate URLs", icon: Globe, desc: "Flag or remove malformed URLs", category: "validation", needsColumn: true },
+  { id: "validate_phones", label: "Validate Phones", icon: Phone, desc: "Flag or remove invalid phone numbers", category: "validation", needsColumn: true },
+  { id: "normalize_currency", label: "Normalize Currency", icon: DollarSign, desc: "Strip symbols ($, €, ¥) and convert to numeric", category: "normalization", needsColumn: true },
+  { id: "standardize_dates", label: "Standardize Dates", icon: Calendar, desc: "Convert to consistent date format (ISO 8601)", category: "normalization", needsColumn: true },
+  { id: "regex_replace", label: "Regex Replace", icon: Regex, desc: "Apply regex pattern replacement", category: "transformation", needsColumn: true, needsParams: ["pattern", "replacement"] },
+  { id: "remove_html_tags", label: "Strip HTML", icon: Braces, desc: "Remove HTML/XML tags from text", category: "cleaning", needsColumn: true },
+  { id: "normalize_whitespace", label: "Normalize Whitespace", icon: Eraser, desc: "Collapse multiple spaces, trim edges", category: "cleaning", needsColumn: true },
+  { id: "extract_numbers", label: "Extract Numbers", icon: Hash, desc: "Extract first numeric value from text", category: "extraction", needsColumn: true },
+  { id: "round_numbers", label: "Round Numbers", icon: Hash, desc: "Round numeric values to N decimals", category: "transformation", needsColumn: true, needsParams: ["decimals"] },
+  { id: "encode_categoricals", label: "Encode Categoricals", icon: Binary, desc: "One-hot or label encode categorical columns", category: "encoding", needsColumn: true, needsParams: ["method"] },
+  { id: "bin_numeric", label: "Bin Numeric", icon: Settings2, desc: "Bucket numeric values into bins", category: "transformation", needsColumn: true, needsParams: ["bins"] },
+  { id: "log_transform", label: "Log Transform", icon: Settings2, desc: "Apply log(1+x) transform to reduce skewness", category: "transformation", needsColumn: true },
+  { id: "deduplicate_fuzzy", label: "Fuzzy Dedup", icon: Type, desc: "Merge near-duplicate text values", category: "deduplication", needsColumn: true, needsParams: ["threshold"] },
+];
+
+const CATEGORY_COLORS: Record<string, string> = {
+  validation: "bg-pink-500/10 text-pink-600 border-pink-500/30",
+  normalization: "bg-amber-500/10 text-amber-600 border-amber-500/30",
+  transformation: "bg-blue-500/10 text-blue-600 border-blue-500/30",
+  cleaning: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30",
+  extraction: "bg-violet-500/10 text-violet-600 border-violet-500/30",
+  encoding: "bg-indigo-500/10 text-indigo-600 border-indigo-500/30",
+  deduplication: "bg-orange-500/10 text-orange-600 border-orange-500/30",
+};
+
+interface PendingOp {
+  uid: string;
+  opId: string;
+  column: string;
+  params: Record<string, string>;
+}
+
+const SemanticOpsBuilder = ({ datasetId }: { datasetId: string | null }) => {
+  const [ops, setOps] = useState<PendingOp[]>([]);
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [applying, setApplying] = useState(false);
+  const [previewResult, setPreviewResult] = useState<PreviewResponse | null>(null);
+  const [showPreviewDialog, setShowPreviewDialog] = useState(false);
+  const queryClient = useQueryClient();
+
+  const { data: schemaData } = useQuery({
+    queryKey: ["dataset-preview", datasetId],
+    queryFn: () => apiFetch<any>(`/datasets/${datasetId}/preview`),
+    enabled: !!datasetId,
+  });
+
+  const columns = useMemo(() => {
+    const cols = schemaData?.columns ?? [];
+    return cols.map((c: any) => c.name || c);
+  }, [schemaData]);
+
+  const addOp = useCallback((opId: string) => {
+    const uid = `op_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    setOps(prev => [...prev, { uid, opId, column: columns[0] || "", params: {} }]);
+  }, [columns]);
+
+  const removeOp = useCallback((uid: string) => {
+    setOps(prev => prev.filter(o => o.uid !== uid));
+  }, []);
+
+  const updateOp = useCallback((uid: string, field: string, value: string) => {
+    setOps(prev => prev.map(o => {
+      if (o.uid !== uid) return o;
+      if (field === "column") return { ...o, column: value };
+      return { ...o, params: { ...o.params, [field]: value } };
+    }));
+  }, []);
+
+  const runSemanticPreview = async () => {
+    if (!datasetId || ops.length === 0) return;
+    setApplying(true);
+    try {
+      const operations = ops.map(o => ({
+        op: o.opId,
+        column: o.column || null,
+        params: o.params,
+      }));
+      const result = await apiFetch<PreviewResponse>(
+        `/cleaning/preview/${datasetId}`,
+        { method: "POST", body: JSON.stringify({ operations }) }
+      );
+      setPreviewResult(result);
+      setShowPreviewDialog(true);
+    } catch (err) {
+      toast.error((err as Error).message || "Preview failed");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const runSemanticApply = async () => {
+    if (!datasetId || ops.length === 0) return;
+    setApplying(true);
+    try {
+      const operations = ops.map(o => ({
+        op: o.opId,
+        column: o.column || null,
+        params: o.params,
+      }));
+      const result = await apiFetch<ApplyResponse>(
+        `/cleaning/apply/${datasetId}`,
+        { method: "POST", body: JSON.stringify({ operations }) }
+      );
+      toast.success(`Semantic cleaning applied: ${result.name}`);
+      queryClient.invalidateQueries({ queryKey: ["datasets"] });
+      setOps([]);
+      setPreviewResult(null);
+    } catch (err) {
+      toast.error((err as Error).message || "Apply failed");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const categories = useMemo(() => {
+    const set = new Set(SEMANTIC_OPS.map(o => o.category));
+    return ["all", ...Array.from(set)];
+  }, []);
+
+  const filteredOps = categoryFilter === "all" ? SEMANTIC_OPS : SEMANTIC_OPS.filter(o => o.category === categoryFilter);
+
+  if (!datasetId) return null;
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-accent" />
+          Semantic Cleaning Operations
+        </h3>
+        <div className="flex items-center gap-1 p-0.5 rounded-lg bg-surface border border-border">
+          {categories.map(c => (
+            <button
+              key={c}
+              onClick={() => setCategoryFilter(c)}
+              className={cn(
+                "px-2 py-1 rounded-md text-[10px] font-medium transition-colors capitalize",
+                categoryFilter === c ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Operation palette */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2 mb-5">
+        {filteredOps.map(op => (
+          <motion.button
+            key={op.id}
+            onClick={() => addOp(op.id)}
+            className="group rounded-lg border border-border bg-card p-3 text-left hover:border-accent/40 hover:bg-accent/5 transition-all"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <op.icon className="h-3.5 w-3.5 text-accent" />
+              <span className="text-[11px] font-medium text-foreground truncate">{op.label}</span>
+            </div>
+            <p className="text-[9px] text-muted-foreground leading-tight truncate">{op.desc}</p>
+            <Badge variant="outline" className={cn("text-[8px] mt-1.5 capitalize", CATEGORY_COLORS[op.category] || "")}>
+              {op.category}
+            </Badge>
+          </motion.button>
+        ))}
+      </div>
+
+      {/* Queued operations */}
+      {ops.length > 0 && (
+        <div className="space-y-2 mb-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+              Queued Operations ({ops.length})
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => setOps([])}>
+              <X className="h-3 w-3" /> Clear all
+            </Button>
+          </div>
+          <AnimatePresence>
+            {ops.map((op, i) => {
+              const def = SEMANTIC_OPS.find(d => d.id === op.opId);
+              if (!def) return null;
+              return (
+                <motion.div
+                  key={op.uid}
+                  initial={{ opacity: 0, y: -8, height: 0 }}
+                  animate={{ opacity: 1, y: 0, height: "auto" }}
+                  exit={{ opacity: 0, x: 20, height: 0 }}
+                  transition={{ duration: 0.25 }}
+                  className="flex items-center gap-3 p-3 rounded-lg border border-border bg-surface/30"
+                >
+                  <span className="text-[10px] font-mono text-muted-foreground w-5 text-center">{i + 1}</span>
+                  <def.icon className="h-4 w-4 text-accent shrink-0" />
+                  <span className="text-[12px] font-medium text-foreground shrink-0">{def.label}</span>
+                  <ArrowRight className="h-3 w-3 text-muted-foreground shrink-0" />
+
+                  <Select value={op.column} onValueChange={v => updateOp(op.uid, "column", v)}>
+                    <SelectTrigger className="w-[160px] h-7 text-[11px]">
+                      <SelectValue placeholder="Column" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c: string) => (
+                        <SelectItem key={c} value={c}>{c}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {def.needsParams?.map(p => (
+                    <Input
+                      key={p}
+                      placeholder={p}
+                      value={op.params[p] || ""}
+                      onChange={e => updateOp(op.uid, p, e.target.value)}
+                      className="w-[100px] h-7 text-[11px]"
+                    />
+                  ))}
+
+                  <div className="flex-1" />
+                  <button
+                    onClick={() => removeOp(op.uid)}
+                    className="h-6 w-6 rounded flex items-center justify-center hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>
+      )}
+
+      {/* Action buttons */}
+      {ops.length > 0 && (
+        <div className="flex items-center gap-3 pt-3 border-t border-border">
+          <div className="text-xs text-muted-foreground">
+            <span className="font-semibold text-foreground">{ops.length}</span> semantic operation{ops.length !== 1 ? "s" : ""} queued
+          </div>
+          <div className="flex-1" />
+          <Button variant="outline" onClick={runSemanticPreview} disabled={applying}>
+            {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+            Preview
+          </Button>
+          <Button onClick={runSemanticApply} disabled={applying}>
+            {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Apply Semantic Cleaning
+          </Button>
+        </div>
+      )}
+
+      {/* Preview Dialog */}
+      <Dialog open={showPreviewDialog} onOpenChange={setShowPreviewDialog}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-accent" /> Semantic Cleaning Preview
+            </DialogTitle>
+            <DialogDescription>
+              Preview of {ops.length} semantic operation{ops.length !== 1 ? "s" : ""}.
+            </DialogDescription>
+          </DialogHeader>
+          {previewResult && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-4 gap-3">
+                <MiniStat label="Rows" value={previewResult.rows_before || 0} after={previewResult.rows_after || 0} />
+                <MiniStat label="Columns" value={(previewResult.columns_before || []).length} after={(previewResult.columns_after || []).length} />
+                <MiniStat label="Cells modified" value={0} after={previewResult.cells_modified || 0} highlight />
+                <MiniStat label="Cols dropped" value={0} after={(previewResult.columns_dropped || []).length} highlight />
+              </div>
+              {previewResult.steps && previewResult.steps.length > 0 && (
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-muted-foreground font-semibold mb-2">Step Results</div>
+                  <div className="space-y-1">
+                    {previewResult.steps.map((step, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs p-2 rounded bg-surface/40">
+                        <span className={cn("h-2 w-2 rounded-full shrink-0", step.status === "applied" ? "bg-success" : "bg-destructive")} />
+                        <span className="font-medium">{step.op}</span>
+                        {step.column && <span className="text-muted-foreground">→ {step.column}</span>}
+                        <span className="text-muted-foreground font-mono">{step.cells_modified ?? 0} cells</span>
+                        {step.error && <span className="text-destructive text-[10px]">{step.error}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setShowPreviewDialog(false)}>Close</Button>
+                <Button onClick={runSemanticApply} disabled={applying}>
+                  {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  Apply & Save
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 };
 

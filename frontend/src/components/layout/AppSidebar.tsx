@@ -8,6 +8,7 @@ import {
   Settings,
   Activity,
   Wand2,
+  FileBarChart,
 } from "lucide-react";
 import {
   Sidebar,
@@ -31,6 +32,7 @@ const workspaceItems = [
   { title: "Query",        url: "/query",      icon: MessageSquare },
   { title: "Dashboards",   url: "/dashboards", icon: LayoutDashboard },
   { title: "Reports",      url: "/reports",    icon: FileText },
+  { title: "Power BI",     url: "/powerbi",    icon: FileBarChart },
 ];
 
 export const AppSidebar = () => {

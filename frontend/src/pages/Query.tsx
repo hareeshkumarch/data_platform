@@ -1,27 +1,21 @@
 import { AppShell } from "@/components/layout/AppShell";
 import { toast } from "sonner";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowUp, Bot, UserRound, CheckCircle2, Loader2,
   MessageSquareText, Workflow, Sparkles, Paperclip, History as HistoryIcon,
-  Trash2, Copy, Send, Settings, MoreHorizontal, Database, Plus, RefreshCw, AlertTriangle,
-  ChevronDown, BarChart3, LineChart, AreaChart, PieChart as PieChartIcon
+  ChevronDown, BarChart3, LineChart, AreaChart, PieChart as PieChartIcon,
 } from "lucide-react";
+import { AnimatedPipeline } from "@/components/agents/AnimatedPipeline";
 
 import { ChartViewer } from "@/components/charts/ChartViewer";
-import { DynamicChart, type ChartSpec } from "@/components/charts/DynamicChart";
+import { DynamicChart } from "@/components/charts/DynamicChart";
 import { MarkdownRenderer } from "@/components/ui/MarkdownRenderer";
 import { QueryHistory } from "@/components/query/QueryHistory";
 import { useQueryStore } from "@/store/useQueryStore";
 import { useAppStore } from "@/store/useAppStore";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { AppSidebar } from "@/components/layout/AppSidebar";
-import { TopBar } from "@/components/layout/TopBar";
 import { cn } from "@/lib/utils";
 import {
   type AgentSummary, type PipelineStage, type QueryMessage, type QueryMode,
@@ -58,8 +52,6 @@ const Query = () => {
     () => (Array.isArray(conversations) ? conversations.find((c) => c.id === activeId) : null) ?? null,
     [conversations, activeId],
   );
-
-
 
   const [historyOpen, setHistoryOpen] = useState(true);
   const [input, setInput] = useState("");
@@ -358,14 +350,19 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
   const running = safeStages.find((s) => s && s.status === "running");
   const completed = safeStages.filter((s) => s && s.status === "done").length;
   const progress = safeStages.length > 0 ? (completed / safeStages.length) * 100 : 0;
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
 
   return (
-    <div className={cn(
-      "card-soft animate-scale-in transition-all duration-500 overflow-hidden",
-      running && "animate-glow-ring border-accent/40 bg-accent/[0.02]",
-      allDone && "border-success/30 bg-success/[0.01]"
-    )}>
+    <motion.div
+      className={cn(
+        "card-soft transition-all duration-500 overflow-hidden",
+        running && "border-accent/40 bg-accent/[0.02] shadow-[0_0_20px_rgba(var(--accent-rgb),0.08)]",
+        allDone && "border-success/30 bg-success/[0.01]"
+      )}
+      initial={{ opacity: 0, y: 16, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.5, ease: "easeOut" }}
+    >
       {/* ── Compact header row (always visible) ── */}
       <button
         type="button"
@@ -375,9 +372,18 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
         <div className={cn(
           "h-7 w-7 rounded-lg flex items-center justify-center shrink-0 transition-all duration-500 shadow-sm",
           allDone ? "bg-success text-success-foreground" : "bg-accent text-accent-foreground",
-          running && "animate-pulse"
         )}>
-          {allDone ? <CheckCircle2 className="h-4 w-4" /> : running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Workflow className="h-4 w-4" />}
+          {allDone ? (
+            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 300 }}>
+              <CheckCircle2 className="h-4 w-4" />
+            </motion.div>
+          ) : running ? (
+            <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: "linear" }}>
+              <Loader2 className="h-4 w-4" />
+            </motion.div>
+          ) : (
+            <Workflow className="h-4 w-4" />
+          )}
         </div>
 
         <div className="flex-1 min-w-0">
@@ -387,44 +393,71 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
               {completed}/{safeStages.length}
             </span>
             {allDone && (
-              <span className="text-[10px] text-success font-medium flex items-center gap-1">
+              <motion.span
+                className="text-[10px] text-success font-medium flex items-center gap-1"
+                initial={{ opacity: 0, x: -8 }}
+                animate={{ opacity: 1, x: 0 }}
+              >
                 <CheckCircle2 className="h-2.5 w-2.5" /> Complete
-              </span>
+              </motion.span>
+            )}
+            {running && (
+              <motion.span
+                className="text-[10px] text-accent font-mono font-semibold"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: [0.5, 1, 0.5] }}
+                transition={{ duration: 1.5, repeat: Infinity }}
+              >
+                {running.name}
+              </motion.span>
             )}
           </div>
           {/* Inline progress bar */}
           <div className="h-1.5 mt-1.5 rounded-full bg-border/50 overflow-hidden relative">
-            <div 
+            <motion.div
               className={cn(
-                "h-full transition-all duration-700 ease-out relative",
-                allDone ? "bg-success" : "bg-gradient-accent"
-              )} 
-              style={{ width: `${progress}%` }} 
+                "h-full relative",
+                allDone ? "bg-success rounded-full" : "bg-gradient-to-r from-accent via-accent to-accent/60 rounded-full"
+              )}
+              initial={{ width: 0 }}
+              animate={{ width: `${progress}%` }}
+              transition={{ duration: 0.6, ease: "easeOut" }}
             >
               {!allDone && (
-                <div className="absolute inset-0 w-full h-full animate-shimmer" style={{ backgroundSize: '200% 100%' }} />
+                <motion.div
+                  className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                  animate={{ x: ["-100%", "100%"] }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                />
               )}
-            </div>
+            </motion.div>
           </div>
         </div>
 
         {/* Mini status dots */}
         <div className="hidden sm:flex items-center gap-1.5 shrink-0 px-2">
           {safeStages.filter(s => s && s.id).map((s, i) => (
-            <div
+            <motion.div
               key={s.id}
               title={s.name}
               className={cn(
-                "h-2 w-2 rounded-full transition-all duration-500",
-                s.status === "done" && "bg-success scale-100",
-                s.status === "running" && "bg-accent scale-150 animate-pulse-soft shadow-[0_0_10px_hsl(var(--accent)/0.6)]",
-                s.status === "pending" && "bg-border/60 scale-75",
+                "h-2 w-2 rounded-full",
+                s.status === "done" && "bg-success",
+                s.status === "running" && "bg-accent shadow-[0_0_10px_hsl(var(--accent)/0.6)]",
+                s.status === "pending" && "bg-border/60",
               )}
-              style={{ transitionDelay: `${i * 50}ms` }}
+              animate={{
+                scale: s.status === "running" ? [1, 1.5, 1] : s.status === "done" ? 1 : 0.75,
+                opacity: s.status === "pending" ? 0.5 : 1,
+              }}
+              transition={{
+                duration: s.status === "running" ? 1 : 0.3,
+                repeat: s.status === "running" ? Infinity : 0,
+                delay: i * 0.05,
+              }}
             />
           ))}
         </div>
-
 
         <ChevronDown className={cn(
           "h-3.5 w-3.5 text-muted-foreground/60 shrink-0 transition-transform duration-200",
@@ -432,41 +465,23 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
         )} />
       </button>
 
-      {/* ── Expanded detail grid ── */}
-      {expanded && (
-        <div className="px-3 pb-3 pt-1 animate-fade-in">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-            {safeStages.filter(s => s && s.id).map((stage) => (
-              <div
-                key={stage.id}
-                className={cn(
-                  "flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors",
-                  stage.status === "running" && "bg-accent-soft/40",
-                )}
-              >
-                <span className={cn(
-                  "h-2 w-2 rounded-full shrink-0",
-                  stage.status === "done" && "bg-success",
-                  stage.status === "running" && "bg-accent animate-pulse",
-                  stage.status === "pending" && "bg-border",
-                )} />
-                <div className="min-w-0">
-                  <p className={cn(
-                    "text-[11px] font-medium leading-tight truncate",
-                    stage.status === "pending" ? "text-muted-foreground/50" : "text-foreground",
-                  )}>
-                    {stage.name}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground truncate">
-                    {stage.status === "done" ? stage.detail : stage.status === "running" ? stage.log : "Pending"}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+      {/* ── Expanded animated detail ── */}
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3, ease: "easeInOut" }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 pb-3 pt-1">
+              <AnimatedPipeline stages={safeStages} compact />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 };
 

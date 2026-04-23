@@ -1,15 +1,11 @@
 import { useEffect, useState } from "react";
 import { Command } from "cmdk";
 import { useNavigate } from "react-router-dom";
-import { Search, Database, LineChart, FileText, Settings, Sparkles, Wand2, X } from "lucide-react";
-import { useDatasetStore } from "@/store/useDatasetStore";
-import { useAppStore } from "@/store/useAppStore";
+import { Search, Database, LineChart, FileText, FileBarChart, Settings, Sparkles, Wand2, X } from "lucide-react";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
-  const activeDatasetId = useAppStore((s) => s.dataset); 
-  // Wait, I need useAppStore from store
 
   // Toggle the menu when ⌘K is pressed
   useEffect(() => {
@@ -101,6 +97,14 @@ export function CommandPalette() {
             >
               <FileText className="mr-2 h-4 w-4" />
               <span>Reports</span>
+            </Command.Item>
+            <Command.Item 
+              value="Power BI Report Builder"
+              onSelect={() => runCommand(() => navigate("/powerbi"))}
+              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+            >
+              <FileBarChart className="mr-2 h-4 w-4" />
+              <span>Power BI</span>
             </Command.Item>
             <Command.Item 
               value="Global Settings"

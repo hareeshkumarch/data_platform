@@ -10,6 +10,7 @@ import DataCleaning from "./pages/DataCleaning";
 import Query from "./pages/Query";
 import Dashboards from "./pages/Dashboards";
 import Reports from "./pages/Reports";
+import PowerBI from "./pages/PowerBI";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 import { CommandPalette } from "@/components/ui/CommandPalette";
@@ -75,6 +76,7 @@ const ThemedApp = () => {
         <Route path="/query" element={<Query />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/reports" element={<Reports />} />
+        <Route path="/powerbi" element={<PowerBI />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
