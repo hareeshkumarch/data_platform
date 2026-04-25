@@ -1,10 +1,5 @@
 from typing import Any, Dict, List
 
-
-# ---------------------------------------------------------------------------
-# React Dashboard Layout Generator
-# ---------------------------------------------------------------------------
-
 REACT_DASHBOARD_SYSTEM = """You are a senior React engineer and UI architect specializing in data dashboards.
 
 You produce clean, production-ready React component configurations. Your output is always:
@@ -14,7 +9,6 @@ You produce clean, production-ready React component configurations. Your output 
 - Sized appropriately for each chart type
 
 You return only valid JSON. No markdown. No preamble. No explanation."""
-
 
 REACT_DASHBOARD_PROMPT = """Dataset: {dataset_name} | Rows: {row_count:,} | Columns: {col_count}
 
@@ -58,11 +52,6 @@ Return this exact JSON and nothing else:
   "refresh_interval_ms": <0 for static, else ms>
 }}"""
 
-
-# ---------------------------------------------------------------------------
-# React Component Code Generator
-# ---------------------------------------------------------------------------
-
 REACT_COMPONENT_SYSTEM = """You are a senior React engineer. You write clean, production-grade React components.
 
 Rules you never break:
@@ -75,7 +64,6 @@ Rules you never break:
 7. Components are self-contained — no external dependencies except react and recharts
 
 You return only the complete component code. No explanation. No markdown fences."""
-
 
 REACT_COMPONENT_PROMPT = """Generate a React TypeScript component for this chart:
 
@@ -100,7 +88,6 @@ Requirements:
 - Clean legend and tooltip
 - Proper axis labels
 - Color scheme: {color_scheme}"""
-
 
 RECHARTS_MAP = {
     "bar": "BarChart",
@@ -132,11 +119,6 @@ DEFAULT_COLORS = [
     "#14b8a6",
 ]
 
-
-# ---------------------------------------------------------------------------
-# React API Integration Guide Prompt
-# ---------------------------------------------------------------------------
-
 REACT_API_INTEGRATION_SYSTEM = """You are a senior React engineer who writes clean API integration code.
 
 You produce:
@@ -155,7 +137,6 @@ Rules:
 
 You return only valid TypeScript code. No explanation."""
 
-
 REACT_API_INTEGRATION_PROMPT = """Generate React hooks and TypeScript interfaces for these API endpoints:
 
 Base URL: {base_url}
@@ -170,11 +151,6 @@ Generate:
 2. Custom React hook for each endpoint using React Query
 3. Error type definitions
 4. A single useDataset(datasetId) composite hook that fetches schema + EDA in parallel"""
-
-
-# ---------------------------------------------------------------------------
-# React State Management Prompt
-# ---------------------------------------------------------------------------
 
 REACT_STATE_PROMPT = """Generate a Zustand store for managing data intelligence platform state.
 
@@ -192,11 +168,6 @@ Requirements:
 - Async actions with loading/error states
 - Persist datasets and ui slices to localStorage
 - Task polling logic using setInterval with cleanup"""
-
-
-# ---------------------------------------------------------------------------
-# Builder Functions
-# ---------------------------------------------------------------------------
 
 
 def build_dashboard_prompt(

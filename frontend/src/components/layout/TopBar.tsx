@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { Search, ChevronDown, Moon, Sun, Database } from "lucide-react";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useAppStore, AppStatus } from "@/store/useAppStore";
-import { cn } from "@/lib/utils";
+import { cn, getOSShortcut } from "@/lib/utils";
 import { apiFetch } from "@/lib/api-client";
 import {
   DropdownMenu,
@@ -85,7 +85,7 @@ export const TopBar = ({
             {title}
           </h1>
           {subtitle ? (
-            <p className="text-[11px] text-muted-foreground truncate">{subtitle}</p>
+            <p className="text-[12px] text-muted-foreground truncate">{subtitle}</p>
           ) : (
             <Breadcrumbs className="mt-0.5" />
           )}
@@ -130,15 +130,16 @@ export const TopBar = ({
           
           <div className="relative flex-1 h-full group">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-colors group-focus-within:text-accent" />
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Ask anything…"
-              aria-label="Search or ask a question"
-              className="w-full h-full pl-10 pr-14 sm:pr-20 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
-            />
+            <button
+              type="button"
+              onClick={() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, metaKey: true, bubbles: true }))}
+              aria-label="Open command palette"
+              className="w-full h-full pl-10 pr-14 sm:pr-20 bg-transparent text-sm text-muted-foreground/70 text-left focus:outline-none cursor-pointer hover:text-muted-foreground transition-colors"
+            >
+              Search datasets, pages, or press {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl+"}K…
+            </button>
             <kbd className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-1 px-1.5 h-5 rounded border border-border bg-card text-[10px] font-mono text-muted-foreground">
-              ⌘K
+              {getOSShortcut("⌘K", "Ctrl+K")}
             </kbd>
           </div>
         </div>
@@ -169,7 +170,7 @@ export const TopBar = ({
             />
             <span className="relative inline-block h-2 w-2 rounded-full bg-current" />
           </span>
-          <span className="text-[11px] font-semibold tracking-wider text-muted-foreground hidden sm:inline uppercase">
+          <span className="text-[12px] font-semibold tracking-wider text-muted-foreground hidden sm:inline uppercase">
             {s.label}
           </span>
         </div>

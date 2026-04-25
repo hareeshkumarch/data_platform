@@ -1,11 +1,3 @@
-"""In-memory cache service with TTL and typed accessors.
-
-Drop-in replacement for the Redis-backed version used by the rest of the backend.
-All methods are ``async`` so the existing call sites keep working without
-modification. Values are scoped per-process which is sufficient for the
-single-worker deployment used here.
-"""
-
 from __future__ import annotations
 
 import json
@@ -21,8 +13,6 @@ logger = get_logger(__name__)
 
 
 class _TTLStore:
-    """Thread-safe in-memory store with per-key TTL and pattern delete."""
-
     def __init__(self) -> None:
         self._data: dict[str, tuple[float, Any]] = {}
         self._counters: dict[str, tuple[int, float]] = defaultdict(lambda: (0, 0.0))
@@ -54,7 +44,6 @@ class _TTLStore:
                 self._data.pop(k, None)
 
     def flush_all(self) -> None:
-        """Wipe every key — equivalent to Redis FLUSHDB."""
         with self._lock:
             self._data.clear()
             self._counters.clear()
@@ -74,8 +63,6 @@ _STORE = _TTLStore()
 
 
 class CacheService:
-    """Namespace-aware cache wrapper that matches the Redis client surface."""
-
     async def get(self, key: str) -> Optional[str]:
         val = _STORE.get(key)
         ns = key.split(":", 1)[0]
@@ -113,7 +100,6 @@ class CacheService:
         _STORE.set(key, value, ttl or settings.CACHE_TTL_DEFAULT)
         return True
 
-    # Typed accessors kept identical to the Redis service so call-sites need no change.
     async def get_schema(self, dataset_id: str) -> Optional[Any]:
         return await self.get_json(f"schema:{dataset_id}")
 
@@ -170,10 +156,10 @@ class CacheService:
     async def get_query(self, key: str) -> Optional[Any]:
         return await self.get_json(f"query:{key}")
 
-    async def set_query(self, key: str, data: Any, dataset_id: Optional[str] = None) -> bool:
+    async def set_query(
+        self, key: str, data: Any, dataset_id: Optional[str] = None
+    ) -> bool:
         ok = await self.set_json(f"query:{key}", data, ttl=settings.CACHE_TTL_QUERY)
-        # Maintain a reverse-index so ``invalidate_dataset`` can purge just the
-        # query keys tied to a dataset without scanning the entire store.
         if dataset_id:
             idx_key = f"query_idx:{dataset_id}"
             existing = _STORE.get(idx_key) or []
@@ -214,8 +200,6 @@ class CacheService:
         ):
             _STORE.delete(key)
 
-        # Query keys are hashed so we can't pattern-match; consult the
-        # reverse-index maintained by ``set_query``.
         idx_key = f"query_idx:{dataset_id}"
         tracked = _STORE.get(idx_key) or []
         if isinstance(tracked, list):
@@ -223,17 +207,159 @@ class CacheService:
                 _STORE.delete(f"query:{k}")
         _STORE.delete(idx_key)
 
-        # State keys follow ``state:{corr_id}:{agent}`` with no dataset_id
-        # embedded, so the old ``delete_prefix(f"state:{dataset_id}")`` was a
-        # no-op. Drop it — state entries already TTL out in an hour.
-
-    async def ping(self) -> bool:  # noqa: D401
-        """Always available — in-memory cache has no connection."""
+    async def ping(self) -> bool:
         return True
 
     async def flush_all(self) -> None:
-        """Wipe everything from the in-memory store."""
         _STORE.flush_all()
 
-    async def close(self) -> None:  # pragma: no cover
+    async def close(self) -> None:
         return None
+
+
+class RedisCacheService:
+    def __init__(self, url: str) -> None:
+        import redis.asyncio as aioredis
+
+        self._url = url
+        self._redis = aioredis.from_url(
+            url, decode_responses=True, socket_connect_timeout=5
+        )
+
+    async def get(self, key: str):
+        return await self._redis.get(key)
+
+    async def set(self, key: str, value, ttl=None):
+        ttl = ttl or settings.CACHE_TTL_DEFAULT
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, default=str)
+        await self._redis.setex(key, ttl, value)
+        return True
+
+    async def delete(self, key: str):
+        await self._redis.delete(key)
+        return True
+
+    async def get_json(self, key: str):
+        raw = await self._redis.get(key)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+
+    async def set_json(self, key: str, value, ttl=None):
+        return await self.set(key, json.dumps(value, default=str), ttl)
+
+    async def check_rate_limit(self, key: str, limit: int, window: int = 60):
+        pipe = self._redis.pipeline()
+        pipe.incr(f"rl:{key}")
+        pipe.expire(f"rl:{key}", window)
+        results = await pipe.execute()
+        return results[0] <= limit
+
+    async def get_schema(self, dataset_id: str):
+        return await self.get_json(f"schema:{dataset_id}")
+
+    async def set_schema(self, dataset_id: str, schema):
+        return await self.set_json(
+            f"schema:{dataset_id}", schema, ttl=settings.CACHE_TTL_LLM
+        )
+
+    async def get_sample(self, dataset_id: str):
+        return await self.get_json(f"sample:{dataset_id}")
+
+    async def set_sample(self, dataset_id: str, rows):
+        return await self.set_json(
+            f"sample:{dataset_id}", rows, ttl=settings.CACHE_TTL_LLM
+        )
+
+    async def get_eda(self, dataset_id: str):
+        return await self.get_json(f"eda:{dataset_id}")
+
+    async def set_eda(self, dataset_id: str, data):
+        return await self.set_json(
+            f"eda:{dataset_id}", data, ttl=settings.CACHE_TTL_LLM
+        )
+
+    async def get_insights(self, dataset_id: str):
+        return await self.get_json(f"insights:{dataset_id}")
+
+    async def set_insights(self, dataset_id: str, data):
+        return await self.set_json(
+            f"insights:{dataset_id}", data, ttl=settings.CACHE_TTL_LLM
+        )
+
+    async def get_charts(self, dataset_id: str):
+        return await self.get_json(f"charts:{dataset_id}")
+
+    async def set_charts(self, dataset_id: str, data):
+        return await self.set_json(
+            f"charts:{dataset_id}", data, ttl=settings.CACHE_TTL_CHART
+        )
+
+    async def get_report(self, dataset_id: str):
+        return await self.get_json(f"report:{dataset_id}")
+
+    async def set_report(self, dataset_id: str, data):
+        return await self.set_json(
+            f"report:{dataset_id}", data, ttl=settings.CACHE_TTL_LLM
+        )
+
+    async def cache_chart_config(self, key: str, config):
+        return await self.set_json(
+            f"chart_cfg:{key}", config, ttl=settings.CACHE_TTL_CHART
+        )
+
+    async def get_query(self, key: str):
+        return await self.get_json(f"query:{key}")
+
+    async def set_query(self, key: str, data, dataset_id=None):
+        return await self.set_json(f"query:{key}", data, ttl=settings.CACHE_TTL_QUERY)
+
+    async def set_agent_state(self, corr_id: str, agent: str, data):
+        return await self.set_json(f"state:{corr_id}:{agent}", data, ttl=3600)
+
+    async def get_agent_state(self, corr_id: str, agent: str):
+        return await self.get_json(f"state:{corr_id}:{agent}")
+
+    async def set_task_progress(self, task_id: str, progress: float, status: str):
+        return await self.set_json(
+            f"task:{task_id}", {"progress": progress, "status": status}, ttl=7200
+        )
+
+    async def get_task_progress(self, task_id: str):
+        return await self.get_json(f"task:{task_id}")
+
+    async def invalidate_dataset(self, dataset_id: str):
+        for key in (
+            f"schema:{dataset_id}",
+            f"sample:{dataset_id}",
+            f"eda:{dataset_id}",
+            f"insights:{dataset_id}",
+            f"charts:{dataset_id}",
+            f"chart_cfg:{dataset_id}",
+            f"report:{dataset_id}",
+        ):
+            await self._redis.delete(key)
+
+    async def ping(self):
+        return await self._redis.ping()
+
+    async def flush_all(self):
+        await self._redis.flushdb()
+
+    async def close(self):
+        await self._redis.close()
+
+
+def get_cache() -> CacheService:
+    if settings.CACHE_BACKEND == "redis" and settings.REDIS_URL:
+        try:
+            return RedisCacheService(settings.REDIS_URL)
+        except Exception as exc:
+            logger.warning(
+                "Redis cache init failed, falling back to in-memory", error=str(exc)
+            )
+    return CacheService()

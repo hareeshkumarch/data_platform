@@ -1,4 +1,4 @@
-import { Plus, MessageSquareText, Workflow, Trash2, History, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
+import { Plus, MessageSquareText, Workflow, Trash2, History, PanelLeftClose, PanelLeftOpen, Search, X, Check } from "lucide-react";
 import { useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useQueryStore } from "@/store/useQueryStore";
@@ -13,7 +13,7 @@ interface QueryHistoryProps {
 // Safe formatRelative
 const formatRelative = (ts: any) => {
   const timestamp = Number(ts);
-  if (isNaN(timestamp) || timestamp <= 0) return "Jan 1";
+  if (isNaN(timestamp) || timestamp <= 0) return "—";
   const diff = Date.now() - timestamp;
   const m = Math.floor(diff / 60000);
   if (m < 1) return "just now";
@@ -28,6 +28,7 @@ const formatRelative = (ts: any) => {
 export const QueryHistory = ({ open, onToggle, onNew }: QueryHistoryProps) => {
   const { conversations = [], activeId, selectConversation, deleteConversation, mode } = useQueryStore();
   const [q, setQ] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     const list = Array.isArray(conversations) ? conversations.filter((c) =>
@@ -132,20 +133,46 @@ export const QueryHistory = ({ open, onToggle, onNew }: QueryHistoryProps) => {
                     <Icon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", active ? "text-accent" : "text-muted-foreground")} />
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-medium truncate">{c.title}</p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
                         {formatRelative(c.updatedAt)} · {c.mode}
                       </p>
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteConversation(c.id);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                      aria-label="Delete conversation"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
+                    {confirmDeleteId === c.id ? (
+                      <div className="flex items-center gap-1 ml-2 shrink-0">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteConversation(c.id);
+                            setConfirmDeleteId(null);
+                          }}
+                          className="h-6 w-6 rounded flex items-center justify-center text-destructive hover:bg-destructive/20 transition-colors"
+                          aria-label="Confirm delete"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDeleteId(null);
+                          }}
+                          className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors"
+                          aria-label="Cancel delete"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDeleteId(c.id);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:bg-destructive/10 hover:text-destructive shrink-0 ml-2"
+                        aria-label="Delete conversation"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    )}
                   </div>
                 </li>
               );

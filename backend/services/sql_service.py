@@ -1,11 +1,3 @@
-"""PostgreSQL-backed SQL warehouse and dataset registry.
-
-Provides:
-* a simple SQL executor limited to ``SELECT`` statements,
-* a seeded ``sales_performance`` sample table for the Query page demo, and
-* a persistent ``datasets`` registry so uploads survive backend restarts.
-"""
-
 from __future__ import annotations
 
 import csv
@@ -35,49 +27,41 @@ from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 _READ_ONLY_PREFIXES = ("select", "with", "show", "explain")
-_DANGEROUS_KEYWORDS = frozenset({
-    "insert",
-    "update",
-    "delete",
-    "drop",
-    "alter",
-    "truncate",
-    "grant",
-    "revoke",
-    "create",
-    "merge",
-    "call",
-    "do",
-    "copy",
-    "vacuum",
-    "reindex",
-    "cluster",
-    "lock",
-})
-# Prefixes that don't accept ``LIMIT`` — appending would produce invalid SQL.
+_DANGEROUS_KEYWORDS = frozenset(
+    {
+        "insert",
+        "update",
+        "delete",
+        "drop",
+        "alter",
+        "truncate",
+        "grant",
+        "revoke",
+        "create",
+        "merge",
+        "call",
+        "do",
+        "copy",
+        "vacuum",
+        "reindex",
+        "cluster",
+        "lock",
+    }
+)
 _NO_LIMIT_PREFIXES = ("show", "explain")
 
 
 def _extract_sql_tokens(sql: str) -> list[str]:
-    """Return lowercase SQL tokens with string literals and comments stripped.
-
-    Used to classify statements without being fooled by column names like
-    ``insert_date`` or comment text like ``/* drop */``.
-    """
-    # Strip block and line comments first
     without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
     without_line = re.sub(r"--[^\n]*", " ", without_block)
-    # Strip single- and double-quoted string literals
+
     without_strings = re.sub(r"'(?:''|[^'])*'", " 'str' ", without_line)
     without_strings = re.sub(r'"(?:""|[^"])*"', ' "id" ', without_strings)
     return [t.lower() for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", without_strings)]
 
 
 class SQLWarehouse:
-    """Thin wrapper around SQLAlchemy used for the SQL executor and registry."""
-
     _instance: "SQLWarehouse | None" = None
     _metadata = MetaData()
 
@@ -130,12 +114,7 @@ class SQLWarehouse:
             )
             self.engine = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
     def bootstrap(self) -> None:
-        """Create the registry tables and seed the demo table if empty."""
         if not self.enabled or self.engine is None:
             return
         self._metadata.create_all(self.engine)
@@ -144,22 +123,7 @@ class SQLWarehouse:
     def _seed_sales_performance(self) -> None:
         assert self.engine is not None
         with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                CREATE TABLE IF NOT EXISTS sales_performance (
-                    id SERIAL PRIMARY KEY,
-                    region TEXT NOT NULL,
-                    product TEXT NOT NULL,
-                    segment TEXT NOT NULL,
-                    month DATE NOT NULL,
-                    revenue NUMERIC(12, 2) NOT NULL,
-                    cost NUMERIC(12, 2) NOT NULL,
-                    customers INTEGER NOT NULL
-                );
-                """
-                )
-            )
+            conn.execute(text())
             count = (
                 conn.execute(text("SELECT COUNT(*) FROM sales_performance")).scalar()
                 or 0
@@ -176,17 +140,12 @@ class SQLWarehouse:
             )
             logger.info("Seeded sales_performance", rows=len(rows))
 
-    # ------------------------------------------------------------------
-    # SQL executor
-    # ------------------------------------------------------------------
-
     def execute(self, query: str, limit: int = 500) -> Dict[str, Any]:
         if not self.enabled or self.engine is None:
             raise RuntimeError("SQL warehouse is not configured on this deployment.")
         stripped = query.strip().rstrip(";")
         if not stripped:
             raise ValueError("Empty query.")
-        # Reject multi-statement submissions (e.g. "SELECT 1; DROP TABLE t").
         if ";" in stripped:
             raise ValueError("Multiple statements are not permitted.")
 
@@ -194,19 +153,13 @@ class SQLWarehouse:
         if not any(lower.startswith(p) for p in _READ_ONLY_PREFIXES):
             raise ValueError("Only SELECT/WITH/SHOW/EXPLAIN statements are permitted.")
 
-        # Tokenise with literals and comments stripped so column names like
-        # ``insert_date`` don't trigger the dangerous-keyword filter.
         tokens = _extract_sql_tokens(stripped)
-        # The first token *after* WITH … AS clauses still must be SELECT. We keep
-        # the check simple: any dangerous keyword appearing as a statement verb
-        # (i.e. not inside a string/comment) is rejected.
         offending = _DANGEROUS_KEYWORDS.intersection(tokens)
         if offending:
             raise ValueError(
                 f"Query contains disallowed keyword(s): {', '.join(sorted(offending))}"
             )
 
-        # ``SHOW``/``EXPLAIN`` don't support LIMIT — don't append in those cases.
         skip_limit = any(lower.startswith(p) for p in _NO_LIMIT_PREFIXES)
         has_limit = bool(re.search(r"\blimit\b", lower))
         effective = (
@@ -227,19 +180,7 @@ class SQLWarehouse:
         if not self.enabled or self.engine is None:
             return []
         with self.engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                SELECT table_name, (SELECT COUNT(*) FROM information_schema.columns c
-                                    WHERE c.table_name = t.table_name) AS col_count
-                FROM information_schema.tables t
-                WHERE table_schema = 'public'
-                  AND table_type = 'BASE TABLE'
-                  AND table_name NOT IN ('datasets', 'conversations')
-                ORDER BY table_name
-                """
-                )
-            ).fetchall()
+            rows = conn.execute(text()).fetchall()
         return [{"name": r[0], "columns": int(r[1] or 0)} for r in rows]
 
     def describe_table(self, table_name: str) -> Dict[str, Any]:
@@ -250,14 +191,7 @@ class SQLWarehouse:
             raise ValueError("Invalid table name.")
         with self.engine.connect() as conn:
             cols = conn.execute(
-                text(
-                    """
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = :t
-                ORDER BY ordinal_position
-                """
-                ),
+                text(),
                 {"t": safe},
             ).fetchall()
             count = conn.execute(text(f"SELECT COUNT(*) FROM {safe}")).scalar() or 0
@@ -269,18 +203,12 @@ class SQLWarehouse:
             ],
         }
 
-    # ------------------------------------------------------------------
-    # Dataset registry (optional persistence)
-    # ------------------------------------------------------------------
-
     def upsert_dataset_record(self, record: Dict[str, Any]) -> None:
         if not self.enabled or self.engine is None:
             return
         values = {
             "id": record["id"],
-            "name": record.get("name")
-            or record.get("filename")
-            or record["id"],
+            "name": record.get("name") or record.get("filename") or record["id"],
             "filename": record.get("filename"),
             "source_type": record.get("source_type", "file"),
             "size_bytes": int(record.get("size_bytes", 0) or 0),
@@ -290,9 +218,6 @@ class SQLWarehouse:
             "created_at": record.get("created_at"),
         }
         try:
-            # Prefer Postgres-native ON CONFLICT for a true, atomic upsert. Fall
-            # back to DELETE+INSERT inside a single transaction for engines that
-            # do not support the dialect-specific insert (e.g. SQLite tests).
             try:
                 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -310,12 +235,11 @@ class SQLWarehouse:
                         {"id": values["id"]},
                     )
                     conn.execute(self.datasets.insert(), values)
-        except SQLAlchemyError as exc:  # pragma: no cover
+        except SQLAlchemyError as exc:
             logger.warning("dataset upsert failed", error=str(exc))
 
 
 def _generate_sales_rows(count: int = 260) -> List[Dict[str, Any]]:
-    """Deterministic sample data so charts render consistently."""
     random.seed(7)
     regions = ["North", "South", "East", "West"]
     products = ["Aurora", "Nebula", "Pulsar", "Quasar"]
@@ -341,7 +265,6 @@ def _generate_sales_rows(count: int = 260) -> List[Dict[str, Any]]:
 
 
 def _jsonable(value: Any) -> Any:
-    """Convert SQL Row values into JSON-safe primitives."""
     if hasattr(value, "isoformat"):
         return value.isoformat()
     if isinstance(value, (bytes, bytearray)):
@@ -357,7 +280,6 @@ def _jsonable(value: Any) -> Any:
 
 
 def export_table_as_csv(table: str) -> bytes:
-    """Return a CSV rendering of the given public table (used for exports)."""
     warehouse = SQLWarehouse.get()
     if not warehouse.enabled or warehouse.engine is None:
         raise RuntimeError("SQL warehouse is not configured.")
@@ -376,7 +298,6 @@ def export_table_as_csv(table: str) -> bytes:
 
 
 def ensure_sample_csv_on_disk() -> Path:
-    """Materialize a sales CSV on disk so the legacy demo seed endpoint works."""
     target = Path(settings.UPLOAD_DIR) / "_demo_sales.csv"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:

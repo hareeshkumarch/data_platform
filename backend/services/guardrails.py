@@ -6,9 +6,6 @@ from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# SQL / Code Injection Patterns
-# ---------------------------------------------------------------------------
 _DANGEROUS_SQL = re.compile(
     r"\b(DROP|DELETE|TRUNCATE|ALTER|INSERT|UPDATE|EXEC|EXECUTE|GRANT|REVOKE|SHUTDOWN|xp_|sp_)\b",
     re.IGNORECASE,
@@ -26,7 +23,7 @@ _PROMPT_INJECTION = re.compile(
     re.IGNORECASE,
 )
 _MAX_QUESTION_LEN = 1000
-_MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 _ALLOWED_EXTENSIONS = {"csv", "json", "parquet", "xlsx", "xls"}
 _ALLOWED_MIME = {
     "text/csv",
@@ -34,11 +31,6 @@ _ALLOWED_MIME = {
     "application/octet-stream",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
-
-
-# ---------------------------------------------------------------------------
-# Input Guardrails
-# ---------------------------------------------------------------------------
 
 
 class InputGuardrails:
@@ -120,11 +112,6 @@ class InputGuardrails:
         return True, ""
 
 
-# ---------------------------------------------------------------------------
-# LLM Output Guardrails
-# ---------------------------------------------------------------------------
-
-
 class OutputGuardrails:
     @staticmethod
     def validate_generated_code(code: str) -> Tuple[bool, str]:
@@ -187,11 +174,6 @@ class OutputGuardrails:
             return max(1, min(max_val, int(value)))
         except Exception:
             return 5
-
-
-# ---------------------------------------------------------------------------
-# Rate Limiter (per-endpoint, per-IP)
-# ---------------------------------------------------------------------------
 
 
 class RateLimiter:

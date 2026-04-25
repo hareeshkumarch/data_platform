@@ -1,7 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
-import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useThemeSync } from "@/hooks/useThemeSync";
 import Insights from "./pages/Insights";
@@ -10,7 +9,7 @@ import DataCleaning from "./pages/DataCleaning";
 import Query from "./pages/Query";
 import Dashboards from "./pages/Dashboards";
 import Reports from "./pages/Reports";
-import PowerBI from "./pages/PowerBI";
+import Analytics from "./pages/Analytics";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 import { CommandPalette } from "@/components/ui/CommandPalette";
@@ -76,7 +75,7 @@ const ThemedApp = () => {
         <Route path="/query" element={<Query />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/reports" element={<Reports />} />
-        <Route path="/powerbi" element={<PowerBI />} />
+        <Route path="/analytics" element={<Analytics />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
@@ -88,7 +87,6 @@ const App = () => (
   <QueryClientProvider client={queryClient}>
     <ErrorBoundary>
       <TooltipProvider>
-        <Toaster />
         <Sonner />
         <ThemedApp />
       </TooltipProvider>

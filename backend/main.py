@@ -1,9 +1,3 @@
-"""Lumen FastAPI entrypoint.
-
-Also exposes an asyncio WebSocket for realtime pipeline progress and wires
-in the SQL executor and persistent dataset store on top of PostgreSQL.
-"""
-
 from __future__ import annotations
 
 import time
@@ -19,6 +13,7 @@ from backend.api.routes.advanced import advanced_router
 from backend.api.routes.cleaning import cleaning_router
 from backend.api.routes.conversations import conversations_router
 from backend.api.routes.endpoints import router
+from backend.api.routes.jobs import jobs_router
 from backend.api.routes.warehouse import warehouse_router
 from backend.api.routes.websocket import register_websockets
 from backend.config import settings
@@ -40,20 +35,21 @@ async def lifespan(app: FastAPI):
         "Starting Lumen",
         version=settings.APP_VERSION,
         provider=settings.DEFAULT_LLM_PROVIDER,
+        cache_backend=settings.CACHE_BACKEND,
+        thread_pool_size=settings.ANALYTICS_THREAD_POOL_SIZE,
     )
     if settings.ENABLE_PROMETHEUS:
         try:
             start_metrics_server()
-        except Exception as exc:  # pragma: no cover - port-in-use on hot reload
+        except Exception as exc:
             logger.warning("Prometheus metrics server failed to start", error=str(exc))
     try:
         SQLWarehouse.get().bootstrap()
-    except (
-        Exception
-    ) as exc:  # pragma: no cover - degrade gracefully when PG unavailable
+        logger.info("PostgreSQL bootstrap complete")
+    except Exception as exc:
         logger.warning("PostgreSQL bootstrap skipped", error=str(exc))
     yield
-    logger.info("Shutdown")
+    logger.info("Shutdown complete", uptime_event="shutdown")
 
 
 app = FastAPI(
@@ -67,7 +63,6 @@ _wildcard_cors = settings.ALLOWED_ORIGINS == ["*"] or "*" in settings.ALLOWED_OR
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    # Browsers reject "*" with credentials=True — disable credentials when wildcard is used.
     allow_credentials=not _wildcard_cors,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -83,8 +78,6 @@ async def timing(request: Request, call_next):
     response = await call_next(request)
     ms = (time.perf_counter() - start) * 1000
     try:
-        # Use the matched route template (e.g. "/api/v1/query/{id}") instead of the raw
-        # URL so Prometheus label cardinality stays bounded.
         route = request.scope.get("route")
         endpoint = getattr(route, "path", None) or request.url.path
         metrics.http_requests.labels(
@@ -93,7 +86,7 @@ async def timing(request: Request, call_next):
             status=response.status_code,
         ).inc()
         metrics.http_duration.labels(endpoint=endpoint).observe(ms / 1000)
-    except Exception:  # pragma: no cover - metric collection must never break requests
+    except Exception:
         pass
     response.headers["X-Response-Time-Ms"] = str(round(ms, 2))
     return response
@@ -101,7 +94,6 @@ async def timing(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_error(request: Request, exc: Exception):
-    # Log the full error server-side but do NOT leak internals to the client.
     logger.error(
         "Unhandled error",
         path=request.url.path,
@@ -122,6 +114,7 @@ app.include_router(conversations_router, prefix=settings.API_PREFIX)
 app.include_router(analytics_router, prefix=settings.API_PREFIX)
 app.include_router(advanced_router, prefix=settings.API_PREFIX)
 app.include_router(cleaning_router, prefix=settings.API_PREFIX)
+app.include_router(jobs_router, prefix=settings.API_PREFIX)
 register_websockets(app)
 
 
@@ -132,5 +125,4 @@ async def root():
 
 @app.get("/api/health")
 async def ingress_health():
-    """Health endpoint served under the /api prefix for the ingress."""
     return {"status": "ok", "service": settings.APP_NAME}

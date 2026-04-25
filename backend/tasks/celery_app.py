@@ -1,11 +1,3 @@
-"""In-process async task runner that mimics the Celery surface used by the API.
-
-The FastAPI endpoints call ``task_xxx.apply_async(kwargs={"payload": {...}})``
-and later query status via ``celery_app.AsyncResult(task_id)``. We keep that
-contract but run every task as a ``asyncio.Task`` inside the main event loop
-so there is no external broker or worker to run.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -24,8 +16,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class _TaskRecord:
-    """Mutable state for one async task execution."""
-
     id: str
     name: str
     state: str = "PENDING"
@@ -38,8 +28,6 @@ class _TaskRecord:
 
 
 class _TaskRegistry:
-    """Thread-safe registry shared across the process."""
-
     def __init__(self) -> None:
         self._records: Dict[str, _TaskRecord] = {}
         self._lock = threading.RLock()
@@ -49,7 +37,6 @@ class _TaskRegistry:
         rec = _TaskRecord(id=str(uuid.uuid4()), name=name)
         with self._lock:
             self._records[rec.id] = rec
-            # Bound the registry so long-running deployments don't leak.
             if len(self._records) > self._max_records:
                 oldest_id = min(
                     self._records, key=lambda k: self._records[k].started_at
@@ -64,21 +51,15 @@ class _TaskRegistry:
 
 _REGISTRY = _TaskRegistry()
 
-# Keep strong references to in-flight asyncio tasks — otherwise the Python
-# garbage collector may cancel them mid-run (PEP 492 / asyncio docs).
 _INFLIGHT: set["asyncio.Task[Any]"] = set()
 
 
 class _AsyncTaskHandle:
-    """Handle returned from ``apply_async`` — provides ``.id``."""
-
     def __init__(self, task_id: str) -> None:
         self.id = task_id
 
 
 class _AsyncResult:
-    """Mimic ``celery.AsyncResult`` for status polling."""
-
     def __init__(self, task_id: str) -> None:
         self._rec = _REGISTRY.get(task_id)
         self.id = task_id
@@ -103,8 +84,6 @@ class _AsyncResult:
 
 
 class _AsyncTask:
-    """Wraps an async coroutine function into a ``apply_async``-able object."""
-
     def __init__(self, name: str, func: Callable[..., Awaitable[Any]]) -> None:
         self.name = name
         self._func = func
@@ -119,8 +98,6 @@ class _AsyncTask:
             rec.state = "STARTED"
             try:
                 result = await self._func(rec, **kwargs)
-                # Set progress *before* state so a poll that lands between the
-                # two writes never sees "SUCCESS" at <100%.
                 rec.progress = 100.0
                 rec.result = result
                 rec.finished_at = time.time()
@@ -137,14 +114,12 @@ class _AsyncTask:
                     tb=traceback.format_exc(),
                 )
 
-        # Schedule on the running loop (or create one if called from a sync context).
         try:
             loop = asyncio.get_running_loop()
             task = loop.create_task(_runner())
             _INFLIGHT.add(task)
             task.add_done_callback(_INFLIGHT.discard)
         except RuntimeError:
-            # fallback — used only in tests invoked synchronously
             asyncio.run(_runner())
         return _AsyncTaskHandle(rec.id)
 
@@ -153,11 +128,6 @@ def _set_progress(rec: _TaskRecord, progress: float, stage: str = "") -> None:
     rec.state = "PROGRESS"
     rec.progress = progress
     rec.stage = stage
-
-
-# --------------------------------------------------------------------------
-# Shared helpers and task implementations
-# --------------------------------------------------------------------------
 
 
 def _services():
@@ -276,7 +246,6 @@ async def _run_report(rec: _TaskRecord, payload: Dict[str, Any]) -> Dict[str, An
 async def _run_pipeline(rec: _TaskRecord, payload: Dict[str, Any]) -> Dict[str, Any]:
     cache, llm, vector, storage = _services()
 
-    # Stage helper — agents also push intermediate state into cache
     async def stage_cb(stages):
         rec.progress = min(99.0, stages.get("progress", rec.progress))
         rec.stage = stages.get("stage", rec.stage)
@@ -292,14 +261,9 @@ async def _run_pipeline(rec: _TaskRecord, payload: Dict[str, Any]) -> Dict[str, 
     return {"success": result.success, "data": result.data, "error": result.error}
 
 
-# --------------------------------------------------------------------------
-# Celery-compatible facade
-# --------------------------------------------------------------------------
-
-
 class _CeleryShim:
     @staticmethod
-    def AsyncResult(task_id: str) -> _AsyncResult:  # noqa: N802
+    def AsyncResult(task_id: str) -> _AsyncResult:
         return _AsyncResult(task_id)
 
 
@@ -315,7 +279,6 @@ task_pipeline = _AsyncTask("pipeline", _run_pipeline)
 
 
 def get_task_record(task_id: str) -> Optional[_TaskRecord]:
-    """Expose the registry for the /task endpoint to read progress info."""
     return _REGISTRY.get(task_id)
 
 

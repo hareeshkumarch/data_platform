@@ -1,9 +1,3 @@
-"""Circuit breaker pattern for LLM provider resilience.
-
-Tracks per-provider failure rates and temporarily blocks unhealthy providers,
-automatically falling back to the next configured provider.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -25,13 +19,6 @@ class _ProviderState:
 
 
 class CircuitBreaker:
-    """Simple circuit breaker for LLM providers.
-
-    - CLOSED: normal operation
-    - OPEN: after ``failure_threshold`` failures within ``window_seconds``
-    - HALF_OPEN: after ``cooldown_seconds``, allows one probe request
-    """
-
     def __init__(
         self,
         failure_threshold: int = 3,
@@ -53,7 +40,6 @@ class CircuitBreaker:
             return False
         elapsed = time.time() - s.opened_at
         if elapsed > self.cooldown_seconds:
-            # Transition to HALF_OPEN automatically; next call will probe
             s.opened_at = None
             s.failures = 0
             return False
@@ -72,7 +58,6 @@ class CircuitBreaker:
         async with self._lock:
             s = self._state(provider)
             now = time.time()
-            # Reset failures if outside the window
             if now - s.last_failure > self.window_seconds:
                 s.failures = 0
             s.failures += 1
@@ -85,14 +70,14 @@ class CircuitBreaker:
                     failures=s.failures,
                 )
 
-    def pick_fallback(self, preferred: str, available: List[str], keys: Dict[str, str]) -> str:
-        """Return the first available provider that is not OPEN and has a key."""
+    def pick_fallback(
+        self, preferred: str, available: List[str], keys: Dict[str, str]
+    ) -> str:
         for p in available:
             if p == preferred:
                 continue
             if not self.is_open(p) and keys.get(p):
                 return p
-        # If everything else is open, return preferred anyway (degraded mode)
         return preferred
 
     def status(self) -> Dict[str, Dict]:

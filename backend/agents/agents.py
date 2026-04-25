@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
+from scipy import stats as sp
 
 from backend.agents.base_agent import BaseAgent
 from backend.config import settings
@@ -50,13 +51,7 @@ logger = get_logger(__name__)
 
 
 def _rehydrate_dataset(dataset_id: str):
-    """Rebuild (schema, sample_rows) from disk for a given dataset.
-
-    Returns ``None`` when the dataset's backing file is missing. This lets the
-    QueryAgent recover gracefully after an in-memory cache flush (backend
-    restart) without forcing users to re-upload files.
-    """
-    from backend.services.storage_service import StorageService  # local import to avoid cycle
+    from backend.services.storage_service import StorageService
 
     storage = StorageService()
     try:
@@ -72,15 +67,9 @@ def _rehydrate_dataset(dataset_id: str):
         "col_count": int(len(df.columns)),
         "columns": infer_schema(df),
     }
-    # Use a larger sample than the in-HTTP-path rehydrator so QueryAgent results
-    # are meaningful (200 rows makes aggregate answers wildly wrong).
+
     sample = df.head(5000).to_dict("records")
     return schema, sample
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INGESTION AGENT
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class IngestionAgent(BaseAgent):
@@ -139,7 +128,7 @@ class IngestionAgent(BaseAgent):
                 return await asyncio.to_thread(parse_csv, content)
             if filepath:
                 return await asyncio.to_thread(pd.read_csv, filepath)
-            # Fallback for pipeline runs on existing datasets
+
             if dataset_id:
                 existing_path = self._storage.get_file_path(dataset_id)
                 if existing_path:
@@ -201,31 +190,28 @@ class IngestionAgent(BaseAgent):
                 json=cfg.get("body"),
             )
             resp.raise_for_status()
-            
+
             content_type = resp.headers.get("Content-Type", "").lower()
-            
-            # If the user specified a json_path or it looks like JSON
+
             if "json" in content_type or url.endswith(".json"):
                 data = resp.json()
-                # Simple JSON path support (e.g. "data.items")
                 json_path = cfg.get("json_path")
                 if json_path:
                     for part in json_path.split("."):
                         if isinstance(data, dict):
                             data = data.get(part, data)
-                
+
                 if isinstance(data, list):
                     return pd.DataFrame(data)
                 return pd.DataFrame([data])
-            
-            # If it looks like CSV
+
             if "csv" in content_type or url.endswith(".csv"):
                 return await asyncio.to_thread(pd.read_csv, io.BytesIO(resp.content))
-            
-            # Fallback: try to guess
+
             try:
                 data = resp.json()
-                if isinstance(data, list): return pd.DataFrame(data)
+                if isinstance(data, list):
+                    return pd.DataFrame(data)
                 return pd.DataFrame([data])
             except Exception:
                 return await asyncio.to_thread(pd.read_csv, io.BytesIO(resp.content))
@@ -249,11 +235,6 @@ class IngestionAgent(BaseAgent):
             "warnings": warnings,
             "duplicate_rows": dups,
         }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# UNDERSTANDING AGENT
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class UnderstandingAgent(BaseAgent):
@@ -353,7 +334,6 @@ class UnderstandingAgent(BaseAgent):
                 continue
             if ct == "numeric":
                 s = df[name].dropna()
-                from scipy import stats as sp
 
                 try:
                     sk, ku = float(sp.skew(s)), float(sp.kurtosis(s))
@@ -464,11 +444,6 @@ class UnderstandingAgent(BaseAgent):
         return w
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FEATURE AGENT
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class FeatureAgent(BaseAgent):
     agent_type = AgentType.FEATURE
 
@@ -510,7 +485,6 @@ class FeatureAgent(BaseAgent):
                 if len(s) > 1 and s.std() > 0:
                     df[f"{name}_scaled"] = (df[name] - s.mean()) / s.std()
                     transformations.append(f"Z-score scaled '{name}'")
-                from scipy import stats as sp
 
                 try:
                     if sp.skew(s) > 1 and (s > 0).all():
@@ -539,11 +513,6 @@ class FeatureAgent(BaseAgent):
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# INSIGHT AGENT
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class InsightAgent(BaseAgent):
     agent_type = AgentType.INSIGHT
 
@@ -555,11 +524,8 @@ class InsightAgent(BaseAgent):
         eda = payload.get("eda") or await self._cache.get_eda(dataset_id)
         schema = await self._cache.get_schema(dataset_id)
         if not schema:
-            raise ValueError(
-                f"Schema missing for {dataset_id}. Run ingestion first."
-            )
+            raise ValueError(f"Schema missing for {dataset_id}. Run ingestion first.")
 
-        # Graceful fallback: compute lightweight EDA inline if not cached
         if not eda:
             rows = await self._cache.get_sample(dataset_id)
             if rows:
@@ -572,7 +538,13 @@ class InsightAgent(BaseAgent):
                     "warnings": [],
                 }
             else:
-                eda = {"quality_score": 0, "summary_stats": {}, "correlation_highlights": "", "anomalies": [], "warnings": []}
+                eda = {
+                    "quality_score": 0,
+                    "summary_stats": {},
+                    "correlation_highlights": "",
+                    "anomalies": [],
+                    "warnings": [],
+                }
 
         prompt = build_insight_prompt(
             dataset_name=schema.get("name", dataset_id),
@@ -604,7 +576,6 @@ class InsightAgent(BaseAgent):
             if not isinstance(data, dict):
                 data = {}
 
-            # Use preamble if explanation is missing or very short
             if preamble and len(data.get("executive_summary", "")) < 20:
                 data["executive_summary"] = preamble
         except Exception as e:
@@ -618,19 +589,22 @@ class InsightAgent(BaseAgent):
                 "executive_summary": "I summarized the findings above but couldn't parse the detailed insights structure.",
             }
 
-        # CRITIC LOOP: Fast review to filter out hallucinated insights
         valid_insights = []
         for i, ins in enumerate(data.get("insights", [])):
-            is_valid, confidence, explanation = await self._critique_insight(ins, eda, payload)
+            is_valid, confidence, explanation = await self._critique_insight(
+                ins, eda, payload
+            )
             if is_valid:
                 ins.setdefault("priority", i + 1)
                 ins.setdefault("confidence", confidence)
                 ins.setdefault("action_items", [])
                 ins.setdefault("related_columns", [])
-                ins["validation_explanation"] = explanation # Explainability layer
+                ins["validation_explanation"] = explanation
                 valid_insights.append(ins)
             else:
-                logger.info(f"Critic loop rejected insight: {ins.get('title')} - {explanation}")
+                logger.info(
+                    f"Critic loop rejected insight: {ins.get('title')} - {explanation}"
+                )
 
         result = {
             "dataset_id": dataset_id,
@@ -643,21 +617,25 @@ class InsightAgent(BaseAgent):
         await self._cache.set_insights(dataset_id, result)
         return result
 
-    async def _critique_insight(self, insight: Dict, eda: Dict, payload: Dict) -> tuple[bool, float, str]:
-        """Critic Agent loop to validate if the insight is factually backed by the raw statistics."""
-        from backend.prompts.templates import INSIGHT_CRITIC_PROMPT, INSIGHT_CRITIC_SYSTEM
+    async def _critique_insight(
+        self, insight: Dict, eda: Dict, payload: Dict
+    ) -> tuple[bool, float, str]:
+        from backend.prompts.templates import (
+            INSIGHT_CRITIC_PROMPT,
+            INSIGHT_CRITIC_SYSTEM,
+        )
 
         req = LLMRequest(
             prompt=INSIGHT_CRITIC_PROMPT.format(
                 insight=json.dumps(insight, indent=2),
-                stats=json.dumps(eda.get("summary_stats", {}))[:1500] # Provide raw stats as ground truth
+                stats=json.dumps(eda.get("summary_stats", {}))[:1500],
             ),
             system_prompt=INSIGHT_CRITIC_SYSTEM,
             provider=payload.get("llm_provider"),
             model_override=payload.get("model_override"),
             mode=LLMMode.FAST,
             temperature=0.0,
-            max_tokens=256
+            max_tokens=256,
         )
 
         try:
@@ -672,49 +650,76 @@ class InsightAgent(BaseAgent):
             return True, 0.7, "Critic validation skipped due to error."
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# QUERY AGENT
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Pandas/NumPy helpers that touch the filesystem, network, or the interpreter.
-# Generated code may not reference any of these — even indirectly via attribute
-# access — because the sandbox injects the real ``pd``/``np`` modules.
-_FORBIDDEN_NAMES = {
-    "eval", "exec", "open", "compile", "input",
-    "getattr", "setattr", "delattr", "hasattr", "vars", "globals", "locals",
-    "__import__", "breakpoint", "help",
-}
 _FORBIDDEN_ATTRS = {
-    # File/network I/O exposed by pandas
-    "read_csv", "read_json", "read_parquet", "read_excel", "read_sql",
-    "read_sql_query", "read_sql_table", "read_html", "read_hdf", "read_feather",
-    "read_pickle", "read_orc", "read_xml", "read_clipboard", "read_fwf",
-    "read_gbq", "read_sas", "read_spss", "read_stata", "read_table",
-    "to_csv", "to_json", "to_parquet", "to_excel", "to_sql", "to_hdf",
-    "to_feather", "to_pickle", "to_orc", "to_xml", "to_clipboard", "to_gbq",
-    "to_stata", "to_html", "to_markdown", "to_latex",
-    # NumPy file I/O
-    "save", "savez", "savez_compressed", "load", "loadtxt", "savetxt",
-    "fromfile", "tofile", "memmap",
-    # Interpreter / module internals
-    "__class__", "__subclasses__", "__bases__", "__mro__", "__globals__",
-    "__builtins__", "__dict__", "__import__", "__getattribute__",
-    "__reduce__", "__reduce_ex__", "__init_subclass__",
+    "read_csv",
+    "read_json",
+    "read_parquet",
+    "read_excel",
+    "read_sql",
+    "read_sql_query",
+    "read_sql_table",
+    "read_html",
+    "read_hdf",
+    "read_feather",
+    "read_pickle",
+    "read_orc",
+    "read_xml",
+    "read_clipboard",
+    "read_fwf",
+    "read_gbq",
+    "read_sas",
+    "read_spss",
+    "read_stata",
+    "read_table",
+    "to_csv",
+    "to_json",
+    "to_parquet",
+    "to_excel",
+    "to_sql",
+    "to_hdf",
+    "to_feather",
+    "to_pickle",
+    "to_orc",
+    "to_xml",
+    "to_clipboard",
+    "to_gbq",
+    "to_stata",
+    "to_html",
+    "to_markdown",
+    "to_latex",
+    "save",
+    "savez",
+    "savez_compressed",
+    "load",
+    "loadtxt",
+    "savetxt",
+    "fromfile",
+    "tofile",
+    "memmap",
+    "__class__",
+    "__subclasses__",
+    "__bases__",
+    "__mro__",
+    "__globals__",
+    "__builtins__",
+    "__dict__",
+    "__import__",
+    "__getattribute__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__init_subclass__",
 }
 
 
 def _validate_code_ast(code_str: str) -> None:
-    """Raise ValueError if the generated code uses forbidden constructs."""
     tree = ast.parse(code_str)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             raise ValueError("Import statements are strictly forbidden.")
         if isinstance(node, ast.Call):
             func = node.func
-            # Direct name call, e.g. open(...)
             if isinstance(func, ast.Name) and func.id in _FORBIDDEN_NAMES:
                 raise ValueError(f"Forbidden function call: {func.id}")
-            # Attribute call, e.g. pd.read_csv(...)
             if isinstance(func, ast.Attribute) and func.attr in _FORBIDDEN_ATTRS:
                 raise ValueError(f"Forbidden attribute call: {func.attr}")
         if isinstance(node, ast.Attribute):
@@ -722,24 +727,46 @@ def _validate_code_ast(code_str: str) -> None:
                 raise ValueError(f"Access to attribute '{node.attr}' is forbidden.")
 
 
-def _secure_runner(code_str: str, input_df: pd.DataFrame, out_queue: multiprocessing.Queue):
+def _secure_runner(
+    code_str: str, input_df: pd.DataFrame, out_queue: multiprocessing.Queue
+):
     try:
-        # 1. Strict AST validation
-        _validate_code_ast(code_str)
-
-        # 2. Execute in a heavily restricted namespace. We expose only the
-        # builtins strictly required to evaluate common Pandas expressions so
-        # that even a successful validation cannot fall back to ``open``/``eval``
-        # via a rebuilt global dictionary.
         safe_builtins = {
-            "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
-            "divmod": divmod, "enumerate": enumerate, "filter": filter,
-            "float": float, "frozenset": frozenset, "int": int, "isinstance": isinstance,
-            "issubclass": issubclass, "iter": iter, "len": len, "list": list,
-            "map": map, "max": max, "min": min, "next": next, "object": object,
-            "pow": pow, "range": range, "reversed": reversed, "round": round,
-            "set": set, "slice": slice, "sorted": sorted, "str": str, "sum": sum,
-            "tuple": tuple, "type": type, "zip": zip, "True": True, "False": False,
+            "abs": abs,
+            "all": all,
+            "any": any,
+            "bool": bool,
+            "dict": dict,
+            "divmod": divmod,
+            "enumerate": enumerate,
+            "filter": filter,
+            "float": float,
+            "frozenset": frozenset,
+            "int": int,
+            "isinstance": isinstance,
+            "issubclass": issubclass,
+            "iter": iter,
+            "len": len,
+            "list": list,
+            "map": map,
+            "max": max,
+            "min": min,
+            "next": next,
+            "object": object,
+            "pow": pow,
+            "range": range,
+            "reversed": reversed,
+            "round": round,
+            "set": set,
+            "slice": slice,
+            "sorted": sorted,
+            "str": str,
+            "sum": sum,
+            "tuple": tuple,
+            "type": type,
+            "zip": zip,
+            "True": True,
+            "False": False,
             "None": None,
         }
         ns = {"df": input_df.copy(), "pd": pd, "np": np, "result_df": None}
@@ -751,7 +778,6 @@ def _secure_runner(code_str: str, input_df: pd.DataFrame, out_queue: multiproces
         out_queue.put({"status": "success", "data": rdf})
     except Exception as ex:
         out_queue.put({"status": "error", "error": f"{type(ex).__name__}: {ex}"})
-
 
 
 class QueryAgent(BaseAgent):
@@ -766,8 +792,6 @@ class QueryAgent(BaseAgent):
         question = payload["question"]
         use_cache = payload.get("use_cache", True)
 
-        # Keep the session identifier in the cache key so follow-up questions
-        # don't collide with one-off queries in the cache namespace.
         session_id_for_key = payload.get("session_id") or f"session_{dataset_id}"
         cache_key = hashlib.sha256(
             f"{dataset_id}:{session_id_for_key}:{question.strip().lower()}".encode()
@@ -780,13 +804,8 @@ class QueryAgent(BaseAgent):
         schema = await self._cache.get_schema(dataset_id)
         rows = await self._cache.get_sample(dataset_id)
         if not schema or not rows:
-            # Attempt to rehydrate from disk via the storage service. This keeps
-            # queries working after a backend restart (the in-memory cache is
-            # empty but the uploaded file and dataset registry row persist).
             try:
-                rehydrated = await asyncio.to_thread(
-                    _rehydrate_dataset, dataset_id
-                )
+                rehydrated = await asyncio.to_thread(_rehydrate_dataset, dataset_id)
             except Exception as exc:
                 logger.warning(
                     "dataset rehydrate failed",
@@ -804,17 +823,18 @@ class QueryAgent(BaseAgent):
 
         rag_context = await self._vector.retrieve(dataset_id, question)
 
-        # 1. Query Understanding & Schema RAG Layer
-        # Attempt to inject short term memory into context
         session_id = payload.get("session_id", f"session_{dataset_id}")
         past_queries = await self._cache.get_json(f"memory:{session_id}") or []
 
-        intent, query_type, model_tier = await self._understand_query(question, past_queries, payload)
+        intent, query_type, model_tier = await self._understand_query(
+            question, past_queries, payload
+        )
 
-        # Dynamic Schema RAG Filter (Top-K selection)
         all_columns = schema.get("columns", [])
         if len(all_columns) > 15:
-            relevant_columns = await self._select_relevant_columns(question, all_columns, payload)
+            relevant_columns = await self._select_relevant_columns(
+                question, all_columns, payload
+            )
         else:
             relevant_columns = all_columns
 
@@ -828,14 +848,14 @@ class QueryAgent(BaseAgent):
             indent=2,
         )
 
-        # Also filter the sample rows to only show relevant columns
         relevant_col_names = {c["name"] for c in relevant_columns}
         filtered_rows = []
         for r in rows[:5]:
-            filtered_rows.append({k: v for k, v in r.items() if k in relevant_col_names})
+            filtered_rows.append(
+                {k: v for k, v in r.items() if k in relevant_col_names}
+            )
         sample_str = json.dumps(filtered_rows, default=str)
 
-        # Resolve model from common payload keys, falling back to dynamic tier routing
         model_name = (
             payload.get("model_override")
             or payload.get("llm_model")
@@ -853,15 +873,22 @@ class QueryAgent(BaseAgent):
             elif col["inferred_type"] == "numeric":
                 df[col["name"]] = pd.to_numeric(df[col["name"]], errors="coerce")
 
-        # 2. Multi-Pass Generation
-        MAX_RETRIES = 3
+        MAX_RETRIES = settings.QUERY_MAX_RETRIES
         execution = {"error": "Initialization failure."}
         plan = {}
         error_feedback = ""
         explanation = ""
 
-        # Formatting past queries to string for the prompt
-        past_queries_str = "\n".join([f"Q: {q.get('question')}\nA: {q.get('explanation', '')}" for q in past_queries[-3:]]) if past_queries else "No previous queries."
+        past_queries_str = (
+            "\n".join(
+                [
+                    f"Q: {q.get('question')}\nA: {q.get('explanation', '')}"
+                    for q in past_queries[-3:]
+                ]
+            )
+            if past_queries
+            else "No previous queries."
+        )
 
         for attempt in range(MAX_RETRIES):
             req = LLMRequest(
@@ -872,12 +899,24 @@ class QueryAgent(BaseAgent):
                     question,
                     intent,
                     payload.get("output_format", "table"),
-                ) + (f"\n\nPrevious Error Feedback to Fix:\n{error_feedback}" if error_feedback else "") + (f"\n\nPast Query Context:\n{past_queries_str}" if past_queries else ""),
+                )
+                + (
+                    f"\n\nPrevious Error Feedback to Fix:\n{error_feedback}"
+                    if error_feedback
+                    else ""
+                )
+                + (
+                    f"\n\nPast Query Context:\n{past_queries_str}"
+                    if past_queries
+                    else ""
+                ),
                 system_prompt=QUERY_SYSTEM,
                 provider=payload.get("llm_provider"),
                 model_override=model_name,
                 mode=mode,
-                temperature=0.1 if attempt == 0 else 0.4,
+                temperature=0.1
+                if attempt == 0
+                else min(0.1 + settings.QUERY_RETRY_TEMP_ESCALATION * attempt, 1.0),
                 max_tokens=2048,
             )
             resp = await self._llm.complete(req)
@@ -898,7 +937,9 @@ class QueryAgent(BaseAgent):
                         "suggested_chart",
                     ]
                 ):
-                    raise ValueError("Parsed JSON does not match the expected Query schema.")
+                    raise ValueError(
+                        "Parsed JSON does not match the expected Query schema."
+                    )
 
                 if preamble and len(plan.get("explanation", "")) < 30:
                     plan["explanation"] = preamble
@@ -907,8 +948,14 @@ class QueryAgent(BaseAgent):
                 if not any(c in clean_content for c in ("{", "[")):
                     plan = {"explanation": clean_content, "generated_code": ""}
                 else:
-                    logger.error("query agent failed to parse json", error=str(e), content=resp.content[:500])
-                    error_feedback = f"JSON Parse Error: {str(e)}. Ensure you output valid JSON."
+                    logger.error(
+                        "query agent failed to parse json",
+                        error=str(e),
+                        content=resp.content[:500],
+                    )
+                    error_feedback = (
+                        f"JSON Parse Error: {str(e)}. Ensure you output valid JSON."
+                    )
                     continue
 
             code = plan.get("generated_code", "")
@@ -916,16 +963,17 @@ class QueryAgent(BaseAgent):
                 execution = {"columns": [], "rows": [], "row_count": 0, "error": None}
                 break
 
-            # BUGFIX applied from code review: we MUST pass a df.copy() to execution
             execution = await asyncio.to_thread(self._exec_code, code, df.copy())
 
             if not execution.get("error"):
-                break # Success!
+                break
 
             error_feedback = f"Execution failed with error:\n{execution.get('error')}\n\nPlease fix the Pandas code and try again."
-            logger.warning(f"Query generation attempt {attempt + 1} failed.", error=execution.get("error"))
+            logger.warning(
+                f"Query generation attempt {attempt + 1} failed.",
+                error=execution.get("error"),
+            )
 
-        # Robust explanation extraction
         explanation = (
             plan.get("explanation")
             or plan.get("answer")
@@ -934,20 +982,12 @@ class QueryAgent(BaseAgent):
             or ""
         )
 
-        # If execution failed, provide a professional, user-friendly refusal or simple explanation
         if execution.get("error"):
-            # We skip the "Technical Note" leakage as per user requirement.
-            # We prioritize the AI's explanation if it's there, otherwise a generic "analysis failed" message.
             if not explanation:
                 explanation = "I encountered an issue analyzing the specific data for this request. Please try rephrasing your question."
             else:
-                # Keep the explanation but DO NOT append the technical error
                 pass
 
-        # As per the new architecture, we no longer use regex to scrub technical notes.
-        # We rely on the unified schema and let the frontend handle fallback displays.
-
-        # Fallback for exploratory queries with empty results/explanations
         if not explanation and intent in ["general", "distribution"]:
             explanation = f"This dataset contains {schema.get('row_count', 0)} records across {len(schema.get('columns', []))} columns. Request more specific analysis if needed."
 
@@ -959,38 +999,36 @@ class QueryAgent(BaseAgent):
                 "query_type": plan.get("query_type", "pandas"),
                 "explanation": explanation,
                 "optimizations_applied": plan.get("optimizations_applied", []),
-                "confidence_score": plan.get("confidence", 0.9 if not execution.get("error") else 0.2),
+                "confidence_score": plan.get(
+                    "confidence", 0.9 if not execution.get("error") else 0.2
+                ),
             },
             "result": execution,
             "suggested_chart": plan.get("suggested_chart", "table"),
             "cached": False,
         }
         await self._cache.set_query(cache_key, result, dataset_id=dataset_id)
-        # Store in session memory for multi-turn context
         memory_key = f"memory:{session_id}"
         memory = await self._cache.get_json(memory_key) or []
-        memory.append({
-            "question": question,
-            "explanation": explanation,
-            "generated_code": plan.get("generated_code", ""),
-            "query_type": plan.get("query_type", "pandas"),
-            "timestamp": time.time(),
-        })
-        # Keep last 10 turns to avoid unbounded growth
-        memory = memory[-10:]
-        await self._cache.set_json(memory_key, memory, ttl=3600)
+        memory.append(
+            {
+                "question": question,
+                "explanation": explanation,
+                "generated_code": plan.get("generated_code", ""),
+                "query_type": plan.get("query_type", "pandas"),
+                "timestamp": time.time(),
+            }
+        )
+        memory = memory[-settings.SESSION_MEMORY_MAX_TURNS :]
+        await self._cache.set_json(memory_key, memory, ttl=settings.SESSION_MEMORY_TTL)
         return result
 
     def _exec_code(self, code: str, df: pd.DataFrame) -> Dict[str, Any]:
-        # Fast-fail on forbidden syntax in the parent process so we don't pay
-        # the spawn cost just to reject the code.
         try:
             _validate_code_ast(code)
         except Exception as exc:
             return {"columns": [], "rows": [], "row_count": 0, "error": str(exc)}
 
-        # Use multiprocessing for true isolation and timeout enforcement. Spawn
-        # is required on Windows and avoids inheriting file descriptors.
         ctx = multiprocessing.get_context("spawn")
         q = ctx.Queue()
         p = ctx.Process(target=_secure_runner, args=(code, df, q), daemon=True)
@@ -1001,26 +1039,41 @@ class QueryAgent(BaseAgent):
                 try:
                     p.terminate()
                     p.join(timeout=2.0)
-                    if p.is_alive():  # pragma: no cover - last resort
+                    if p.is_alive():
                         p.kill()
                         p.join(timeout=1.0)
                 except Exception:
                     pass
 
         try:
-            result = q.get(timeout=10.0)  # hard wall-clock timeout
+            result = q.get(timeout=settings.CODE_EXEC_TIMEOUT_SEC)
             p.join(timeout=2.0)
             _kill()
             if result.get("status") == "error":
-                return {"columns": [], "rows": [], "row_count": 0, "error": result.get("error")}
+                return {
+                    "columns": [],
+                    "rows": [],
+                    "row_count": 0,
+                    "error": result.get("error"),
+                }
             rdf = result.get("data")
         except queue.Empty:
             _kill()
-            return {"columns": [], "rows": [], "row_count": 0, "error": "Execution timeout (10s exceeded)."}
+            return {
+                "columns": [],
+                "rows": [],
+                "row_count": 0,
+                "error": f"Execution timeout ({settings.CODE_EXEC_TIMEOUT_SEC}s exceeded).",
+            }
         except Exception as e:
             _kill()
-            return {"columns": [], "rows": [], "row_count": 0, "error": f"{type(e).__name__}: {e}"}
-        
+            return {
+                "columns": [],
+                "rows": [],
+                "row_count": 0,
+                "error": f"{type(e).__name__}: {e}",
+            }
+
         if rdf is None:
             rdf = pd.DataFrame()
         if isinstance(rdf, pd.Series):
@@ -1028,25 +1081,32 @@ class QueryAgent(BaseAgent):
             rdf.columns = ["index", "value"]
         if not isinstance(rdf, pd.DataFrame):
             rdf = pd.DataFrame({"result": [rdf]})
-        rdf = rdf.head(500)
+        rdf = rdf.head(settings.CODE_EXEC_MAX_ROWS)
         return {
             "columns": list(rdf.columns),
             "rows": sanitize_rows(rdf.to_dict("records")),
             "row_count": len(rdf),
         }
 
-    async def _understand_query(self, question: str, past_queries: list, payload: Dict) -> tuple[str, str, str]:
-        # Intelligent Query Understanding Layer using LLM
-        from backend.prompts.templates import QUERY_UNDERSTANDING_PROMPT, QUERY_UNDERSTANDING_SYSTEM
+    async def _understand_query(
+        self, question: str, past_queries: list, payload: Dict
+    ) -> tuple[str, str, str]:
+        from backend.prompts.templates import (
+            QUERY_UNDERSTANDING_PROMPT,
+            QUERY_UNDERSTANDING_SYSTEM,
+        )
 
         req = LLMRequest(
-            prompt=QUERY_UNDERSTANDING_PROMPT.format(question=question, history="\n".join([q.get("question", "") for q in past_queries[-3:]])),
+            prompt=QUERY_UNDERSTANDING_PROMPT.format(
+                question=question,
+                history="\n".join([q.get("question", "") for q in past_queries[-3:]]),
+            ),
             system_prompt=QUERY_UNDERSTANDING_SYSTEM,
             provider=payload.get("llm_provider"),
             model_override=payload.get("model_override"),
             mode=LLMMode.FAST,
             temperature=0.0,
-            max_tokens=256
+            max_tokens=256,
         )
 
         try:
@@ -1062,15 +1122,19 @@ class QueryAgent(BaseAgent):
             logger.error(f"Query Understanding failed, falling back to heuristics: {e}")
             return self._detect_intent(question), "aggregation", "fast"
 
-    async def _select_relevant_columns(self, question: str, all_columns: List[Dict], payload: Dict) -> List[Dict]:
-        """Schema RAG: Dynamically filter columns to fit into context without overwhelming the LLM."""
+    async def _select_relevant_columns(
+        self, question: str, all_columns: List[Dict], payload: Dict
+    ) -> List[Dict]:
         from backend.prompts.templates import SCHEMA_FILTER_SYSTEM, SCHEMA_FILTER_PROMPT
 
-        # Format a lightweight version of the schema for the LLM
-        schema_summary = "\n".join([f"- {c['name']} ({c['inferred_type']})" for c in all_columns])
+        schema_summary = "\n".join(
+            [f"- {c['name']} ({c['inferred_type']})" for c in all_columns]
+        )
 
         req = LLMRequest(
-            prompt=SCHEMA_FILTER_PROMPT.format(question=question, schema=schema_summary),
+            prompt=SCHEMA_FILTER_PROMPT.format(
+                question=question, schema=schema_summary
+            ),
             system_prompt=SCHEMA_FILTER_SYSTEM,
             provider=payload.get("llm_provider"),
             model_override=payload.get("model_override"),
@@ -1083,10 +1147,8 @@ class QueryAgent(BaseAgent):
             data, _ = LLMService.extract_json_with_preamble(resp.content)
             selected_names = set(data.get("selected_columns", []))
 
-            # Map selected names back to original column dicts
             filtered = [c for c in all_columns if c["name"] in selected_names]
 
-            # Fallback if LLM returned bad structure or no columns
             if not filtered:
                 return all_columns[:20]
             return filtered
@@ -1110,11 +1172,6 @@ class QueryAgent(BaseAgent):
         if any(w in q for w in ["sum", "total", "count", "average", "mean"]):
             return "aggregation"
         return "general"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUALIZATION AGENT
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class VisualizationAgent(BaseAgent):
@@ -1216,11 +1273,6 @@ class VisualizationAgent(BaseAgent):
                 }
             )
         return kpis
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# REPORT AGENT
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class ReportAgent(BaseAgent):
@@ -1338,11 +1390,6 @@ class ReportAgent(BaseAgent):
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# EVALUATOR AGENT
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class EvaluatorAgent(BaseAgent):
     agent_type = AgentType.EVALUATOR
 
@@ -1354,7 +1401,6 @@ class EvaluatorAgent(BaseAgent):
         schema = await self._cache.get_schema(dataset_id)
         insights_data = await self._cache.get_insights(dataset_id)
         charts_data = await self._cache.get_charts(dataset_id)
-        # We also need report data - orchestrator passes results of report agent
         report_data = payload.get("report")
 
         prompt = build_evaluator_prompt(
@@ -1370,7 +1416,7 @@ class EvaluatorAgent(BaseAgent):
             provider=payload.get("llm_provider"),
             model_override=payload.get("model_override"),
             mode=LLMMode.ADVANCED,
-            temperature=0.0,  # Evaluation should be deterministic
+            temperature=0.0,
         )
         resp = await self._llm.complete(req)
 
@@ -1384,9 +1430,11 @@ class EvaluatorAgent(BaseAgent):
             data = {
                 "is_satisfied": True,
                 "quality_score": 8,
-                "findings": ["Automated evaluation completed but structure was unparseable."],
+                "findings": [
+                    "Automated evaluation completed but structure was unparseable."
+                ],
                 "refinement_instruction": "Ready for delivery",
-                "data_verified": True
+                "data_verified": True,
             }
 
         return {

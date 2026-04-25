@@ -1,9 +1,3 @@
-"""Additional end-to-end tests for Groq provider support, dashboard/query/WS
-pipeline flows, and graceful-error behaviour when GROQ_API_KEY is absent.
-
-Complements test_lumen_e2e.py.
-"""
-
 from __future__ import annotations
 
 import json
@@ -26,17 +20,11 @@ EXPECTED_GROQ_MODELS = {
 }
 
 
-# ---------------- Ingress health ----------------
-
-
 def test_ingress_health():
     r = requests.get(f"{BASE}/api/health", timeout=30)
     assert r.status_code == 200
     body = r.json()
     assert body.get("status") == "ok"
-
-
-# ---------------- Models/providers: Groq exposure ----------------
 
 
 def test_models_includes_groq_and_catalogue():
@@ -54,10 +42,10 @@ def test_settings_providers_exposes_groq_key_flags():
     assert r.status_code == 200
     body = r.json()
     assert "groq" in body["providers"]
-    # A provider key should be configured for runtime calls
+
     assert body.get("key_configured") is True
     assert "key_masked" in body
-    # Groq-specific fields must be exposed even when empty
+
     assert "groq_key_masked" in body
     assert "groq_key_configured" in body
     assert body["groq_key_configured"] is False
@@ -68,7 +56,7 @@ def test_metrics_llm_key_source_provider():
     r = requests.get(f"{API}/metrics/llm", timeout=30)
     assert r.status_code == 200
     body = r.json()
-    # key_source should be one of the configured providers (or none).
+
     assert body.get("key_source") in (
         "openai",
         "anthropic",
@@ -79,11 +67,7 @@ def test_metrics_llm_key_source_provider():
     assert body["key_source"] in ("openai", "anthropic", "gemini", "groq", "none")
 
 
-# ---------------- Settings POST accepts groq provider ----------------
-
-
 def test_settings_accepts_groq_provider_whitelist():
-    # POST groq — must be accepted even though key is missing (validation is on whitelist)
     r = requests.post(
         f"{API}/settings",
         json={"provider": "groq", "model": "llama-3.3-70b-versatile"},
@@ -95,16 +79,13 @@ def test_settings_accepts_groq_provider_whitelist():
     pr = requests.get(f"{API}/settings/providers", timeout=30).json()
     assert pr["default_provider"] == "groq"
     assert pr["default_model"] == "llama-3.3-70b-versatile"
-    # revert to openai so downstream tests keep working
+
     r2 = requests.post(
         f"{API}/settings",
         json={"provider": "openai", "model": "gpt-5.2"},
         timeout=30,
     )
     assert r2.status_code in (200, 201)
-
-
-# ---------------- Groq without key returns graceful 500 mentioning GROQ_API_KEY ----------------
 
 
 def test_chat_groq_without_key_returns_clear_error():
@@ -117,7 +98,7 @@ def test_chat_groq_without_key_returns_clear_error():
         },
         timeout=60,
     )
-    # Expected to error since GROQ_API_KEY is empty — we assert the message is informative.
+
     assert r.status_code in (400, 500, 502, 503), (
         f"unexpected status: {r.status_code} {r.text}"
     )
@@ -127,15 +108,12 @@ def test_chat_groq_without_key_returns_clear_error():
     )
 
 
-# ---------------- Dataset + downstream pipeline ----------------
-
-
 @pytest.fixture(scope="module")
 def dataset_id() -> str:
     r = requests.post(f"{API}/datasets/seed-demo", timeout=60)
     assert r.status_code in (200, 201, 202), r.text
     body = r.json()
-    # Idempotent reuse path: task_id=null, dataset_id already present
+
     if (
         body.get("status") == "success"
         and body.get("task_id") is None
@@ -157,7 +135,7 @@ def dataset_id() -> str:
         if tb.get("status") in ("failed", "error", "FAILURE"):
             pytest.fail(f"seed failed: {tb}")
         time.sleep(1.0)
-    # Prefer the dataset_id returned by seed-demo; fallback to scanning list
+
     if body.get("dataset_id"):
         return body["dataset_id"]
     items = requests.get(f"{API}/datasets", timeout=30).json()
@@ -174,7 +152,7 @@ def dataset_id() -> str:
 
 def test_process_data_and_eda(dataset_id):
     r = requests.post(f"{API}/process-data/{dataset_id}", json={}, timeout=60)
-    # either returns task or direct result
+
     assert r.status_code in (200, 201, 202), r.text
     body = r.json()
     task_id = body.get("task_id") or body.get("id")
@@ -192,7 +170,7 @@ def test_process_data_and_eda(dataset_id):
             if tb.get("status") in ("failed", "error", "FAILURE"):
                 pytest.fail(f"process-data failed: {tb}")
             time.sleep(1.0)
-    # EDA fetch
+
     er = requests.get(f"{API}/eda/{dataset_id}", timeout=30)
     assert er.status_code == 200, er.text
     ebody = er.json()
@@ -241,7 +219,7 @@ def test_chart_generate_shape(dataset_id):
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    # must have some type and data
+
     chart_type = (
         body.get("chart_type")
         or body.get("type")
@@ -281,7 +259,7 @@ def test_dashboard_generate_and_fetch(dataset_id):
     kpis = gbody.get("kpis") or []
     assert isinstance(charts, list), f"charts not list: {gbody}"
     assert isinstance(kpis, list), f"kpis not list: {gbody}"
-    # at least one of the two should be populated
+
     assert len(charts) + len(kpis) > 0, f"dashboard empty: {gbody}"
 
 
@@ -313,7 +291,7 @@ def test_query_natural_language(dataset_id):
             time.sleep(2.0)
         assert final is not None, "query task did not complete"
         body = final.get("result") or final
-    # Either rows or plan/sql should be present
+
     has_payload = any(
         k in body for k in ("rows", "data", "sql", "plan", "result", "answer")
     )
@@ -332,12 +310,9 @@ def test_analytics_kpis_and_profile(dataset_id):
         assert body, f"{analysis} returned empty: {body}"
 
 
-# ---------------- WS pipeline ----------------
-
-
 def test_ws_pipeline_flow():
     try:
-        from websockets.sync.client import connect  # type: ignore
+        from websockets.sync.client import connect
     except Exception:
         pytest.skip("websockets lib not available in this env")
 

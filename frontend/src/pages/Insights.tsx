@@ -18,10 +18,8 @@ interface Outlier {
 }
 
 const Insights = () => {
-  const { dataset: selectedDataset, setDataset } = useAppStore((state) => ({
-    dataset: state.dataset,
-    setDataset: state.setDataset,
-  }));
+  const selectedDataset = useAppStore((state) => state.dataset);
+  const setDataset = useAppStore((state) => state.setDataset);
 
   const { data: datasetsResp } = useQuery({
     queryKey: ["datasets"],
@@ -147,7 +145,7 @@ const Insights = () => {
   const datasetName = useMemo(() => {
     if (preview?.name) return preview.name;
     if (preview?.filename) return preview.filename;
-    return datasets.find((d) => d.id === activeDatasetId)?.name ?? "—";
+    return datasets.find((d) => d.id === activeDatasetId)?.name ?? "No dataset selected";
   }, [preview, datasets, activeDatasetId]);
 
   return (
@@ -163,7 +161,7 @@ const Insights = () => {
             <h1 className="mt-2 text-2xl font-semibold text-foreground tracking-tight">{datasetName}</h1>
             <p className="mt-1 text-sm text-muted-foreground">
               {totalRows > 0
-                ? `${formatNumber(totalRows)} rows · ${totalCols} fields analysed`
+                ? `${formatNumber(totalRows)} rows Â· ${totalCols} fields analysed`
                 : datasets.length > 0
                   ? "Select a dataset to generate insights"
                   : "Upload a dataset to populate these metrics."}
@@ -186,7 +184,7 @@ const Insights = () => {
                 ))}
               </SelectContent>
             </Select>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-[12px] text-muted-foreground">
               Pick a dataset to refresh the insight summary
             </span>
           </div>
@@ -229,7 +227,7 @@ const Insights = () => {
             <div className="overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead>
-                  <tr className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                  <tr className="text-[12px] uppercase tracking-[0.16em] text-muted-foreground">
                     <th className="py-2 pr-4 font-medium">Column</th>
                     <th className="py-2 pr-4 font-medium">Type</th>
                     <th className="py-2 pr-4 font-medium text-right">Missing</th>
@@ -240,7 +238,7 @@ const Insights = () => {
                   {columnSummary.map((column) => (
                     <tr key={column.name}>
                       <td className="py-2 pr-4 text-foreground">{column.name}</td>
-                      <td className="py-2 pr-4 text-muted-foreground">{column.inferred_type ?? "—"}</td>
+                      <td className="py-2 pr-4 text-muted-foreground">{column.inferred_type ?? "â€”"}</td>
                       <td className="py-2 pr-4 text-right text-muted-foreground font-mono">
                         {(column.null_pct ?? 0).toFixed(1)}%
                       </td>
@@ -253,7 +251,11 @@ const Insights = () => {
               </table>
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">Column metadata will appear once profiling completes.</p>
+            <div className="py-8 flex flex-col items-center gap-2">
+              <Database className="h-8 w-8 text-muted-foreground/30" />
+              <p className="text-sm font-medium text-foreground">No column data available</p>
+              <p className="text-xs text-muted-foreground">Select a dataset above to view its column profile.</p>
+            </div>
           )}
         </section>
 
@@ -266,7 +268,7 @@ const Insights = () => {
             <div className="overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead>
-                  <tr className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                  <tr className="text-[12px] uppercase tracking-[0.16em] text-muted-foreground">
                     {sampleColumns.map((column) => (
                       <th key={column} className="py-2 pr-4 font-medium">
                         {column}
@@ -318,7 +320,7 @@ const MetricCard = ({ icon: Icon, label, value, hint }: MetricProps) => (
   <div className="rounded-xl border border-border/60 bg-card p-4 shadow-soft">
     <div className="flex items-center gap-2">
       <Icon className="h-4 w-4 text-accent" />
-      <span className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">{label}</span>
+      <span className="text-[12px] uppercase tracking-[0.16em] text-muted-foreground">{label}</span>
     </div>
     <p className="mt-3 text-2xl font-semibold text-foreground tabular-nums">{value}</p>
     <p className="mt-1 text-xs text-muted-foreground">{hint}</p>

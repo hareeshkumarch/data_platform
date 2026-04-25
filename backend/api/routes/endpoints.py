@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import base64
 import io
 import json
@@ -69,7 +70,6 @@ async def _get_df_and_schema(dataset_id: str, cache: CacheService):
     schema = await cache.get_schema(dataset_id)
     rows = await cache.get_sample(dataset_id)
     if not schema:
-        # Fallback: try to re-read from disk and rebuild cache
         storage = await get_storage()
         try:
             df = await storage.load_dataframe(dataset_id)
@@ -92,9 +92,6 @@ async def _get_df_and_schema(dataset_id: str, cache: CacheService):
         await cache.set_sample(dataset_id, sample)
         return df, schema
     return pd.DataFrame(rows or []), schema
-
-
-# ── Request Models ────────────────────────────────────────────────────────────
 
 
 class ProcessReq(BaseModel):
@@ -229,9 +226,6 @@ class ReactComponentReq(BaseModel):
     llm_provider: Optional[str] = None
 
 
-# ── System ────────────────────────────────────────────────────────────────────
-
-
 @router.get("/health")
 async def health(cache: CacheService = Depends(get_cache)):
     return {
@@ -246,7 +240,6 @@ async def health_deep(
     cache: CacheService = Depends(get_cache),
     llm: LLMService = Depends(get_llm),
 ):
-    """Deep health check: validates cache ping + LLM connectivity with a tiny probe call."""
     cache_ok = await cache.ping()
     llm_ok = False
     llm_error = None
@@ -287,34 +280,31 @@ async def clear_system(
     storage: StorageService = Depends(get_storage),
     cache: CacheService = Depends(get_cache),
 ):
-    """Nuke the database, cache, and all history completely."""
     import shutil
     from pathlib import Path
+
     try:
-        # Clear storage directory
         datasets = storage.list_datasets()
         for d in datasets:
             did = d.get("id") or d.get("dataset_id")
             if did:
                 storage.delete_dataset(did)
-        
-        # Clear FAISS Vector store
+
         faiss_dir = Path(settings.FAISS_INDEX_PATH)
         if faiss_dir.exists():
             shutil.rmtree(faiss_dir)
             faiss_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Flush in-memory cache (TTLStore)
+
         await cache.flush_all()
-        
-        # Reset in-memory LLM stats so Settings page shows clean metrics
+
         from backend.services.llm_service import _GLOBAL_LLM_STATS
+
         _GLOBAL_LLM_STATS.calls = 0
         _GLOBAL_LLM_STATS.tokens_in = 0
         _GLOBAL_LLM_STATS.tokens_out = 0
         _GLOBAL_LLM_STATS.errors = 0
         _GLOBAL_LLM_STATS.latency_sum_ms = 0.0
-            
+
         return {"status": "success", "message": "System wiped clean."}
     except Exception as e:
         logger.error(f"Failed to clear system: {e}")
@@ -343,9 +333,6 @@ async def list_processors():
     return {"processors": DataPipeline.available_processors()}
 
 
-# ── Upload ────────────────────────────────────────────────────────────────────
-
-
 @router.post("/upload-data")
 async def upload_data(
     file: UploadFile = File(...),
@@ -353,8 +340,6 @@ async def upload_data(
     storage: StorageService = Depends(get_storage),
     request: Request = None,
 ):
-    # Stream-read the upload so we can reject oversized files without pulling
-    # the full payload into memory first.
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     chunks: list[bytes] = []
     total = 0
@@ -376,6 +361,17 @@ async def upload_data(
     )
     if not ok:
         raise HTTPException(400, msg)
+
+    validation = storage.validate_upload(content, filename)
+    if not validation["valid"]:
+        raise HTTPException(
+            422,
+            detail={
+                "message": "Upload validation failed.",
+                "errors": validation["errors"],
+                "stats": validation.get("stats", {}),
+            },
+        )
 
     ext = filename.rsplit(".", 1)[-1].lower()
     source_type = {
@@ -412,6 +408,7 @@ async def upload_data(
         "task_id": task.id,
         "status": "pending",
         "message": "Uploaded. Ingestion queued.",
+        "validation_warnings": validation.get("warnings", []),
     }
 
 
@@ -422,7 +419,6 @@ async def seed_demo_dataset(
 ):
     from backend.services.sql_service import ensure_sample_csv_on_disk
 
-    # Reuse an already-seeded demo dataset if its schema is cached (idempotent).
     for existing in storage.list_datasets():
         did = existing.get("id") or existing.get("dataset_id")
         fname = existing.get("filename") or ""
@@ -515,7 +511,40 @@ async def upload_api(body: APIReq):
     return {"dataset_id": dataset_id, "task_id": task.id, "status": "pending"}
 
 
-# ── Dataset ───────────────────────────────────────────────────────────────────
+@router.get("/datasets/stale")
+async def list_stale_datasets(
+    max_age_days: int = 90,
+    storage: StorageService = Depends(get_storage),
+):
+    stale = storage.list_stale_datasets(max_age_days=max_age_days)
+    return {"stale_datasets": stale, "count": len(stale), "max_age_days": max_age_days}
+
+
+@router.get("/datasets/storage-stats")
+async def get_storage_stats(
+    storage: StorageService = Depends(get_storage),
+):
+    return storage.get_storage_stats()
+
+
+@router.get("/datasets/{dataset_id}/verify-checksum")
+async def verify_dataset_checksum(
+    dataset_id: str,
+    storage: StorageService = Depends(get_storage),
+):
+    result = storage.verify_checksum(dataset_id)
+    if not result.get("valid") and "error" in result:
+        raise HTTPException(404, detail=result["error"])
+    return result
+
+
+@router.post("/datasets/purge-stale")
+async def purge_stale_datasets(
+    max_age_days: int = 90,
+    storage: StorageService = Depends(get_storage),
+):
+    result = storage.purge_stale_datasets(max_age_days=max_age_days)
+    return result
 
 
 @router.get("/schema/{dataset_id}")
@@ -526,7 +555,6 @@ async def get_schema(
 ):
     schema = await cache.get_schema(dataset_id)
     if not schema:
-        # Try to rebuild from disk
         try:
             df, schema = await _get_df_and_schema(dataset_id, cache)
         except HTTPException:
@@ -575,7 +603,7 @@ async def list_datasets(
                             entry["col_count"] = len(header)
                     except Exception:
                         pass
-        # Dedup by (name, row_count, col_count) — prefer entries with live schema
+
         key = f"{entry.get('name')}::{entry.get('row_count', 0)}::{entry.get('col_count', 0)}"
         existing = seen_names.get(key)
         if not existing or (
@@ -620,9 +648,6 @@ async def preview_dataset(
     }
 
 
-# ── Processing ────────────────────────────────────────────────────────────────
-
-
 @router.post("/process-data/{dataset_id}")
 async def process_data(
     dataset_id: str, body: ProcessReq, cache: CacheService = Depends(get_cache)
@@ -656,9 +681,6 @@ async def get_eda(dataset_id: str, cache: CacheService = Depends(get_cache)):
     return data
 
 
-# ── Processor Pipeline ────────────────────────────────────────────────────────
-
-
 @router.post("/pipeline/process/{dataset_id}")
 async def run_data_pipeline(
     dataset_id: str, body: PipelineReq, cache: CacheService = Depends(get_cache)
@@ -674,9 +696,6 @@ async def run_data_pipeline(
     result["columns"] = list(processed_df.columns)
     result["dataset_id"] = dataset_id
     return result
-
-
-# ── Analytics ─────────────────────────────────────────────────────────────────
 
 
 @router.post("/analytics/{dataset_id}")
@@ -768,9 +787,6 @@ async def run_analytics(
         )
 
 
-# ── Compare Datasets ──────────────────────────────────────────────────────────
-
-
 @router.post("/compare")
 async def compare_datasets(body: CompareReq, cache: CacheService = Depends(get_cache)):
     rows_a = await cache.get_sample(body.dataset_id_a)
@@ -795,10 +811,14 @@ async def compare_datasets(body: CompareReq, cache: CacheService = Depends(get_c
     from backend.utils.data_utils import _safe
 
     if body.metric_col in df_a.columns and body.metric_col in df_b.columns:
-        sa, sb = pd.to_numeric(df_a[body.metric_col], errors="coerce").dropna(), pd.to_numeric(df_b[body.metric_col], errors="coerce").dropna()
+        sa, sb = (
+            pd.to_numeric(df_a[body.metric_col], errors="coerce").dropna(),
+            pd.to_numeric(df_b[body.metric_col], errors="coerce").dropna(),
+        )
         a_mean = float(sa.mean()) if len(sa) > 0 else 0.0
         b_mean = float(sb.mean()) if len(sb) > 0 else 0.0
         import math
+
         mean_diff_pct = (
             round((b_mean - a_mean) / abs(a_mean) * 100, 2)
             if math.isfinite(a_mean) and a_mean != 0 and math.isfinite(b_mean)
@@ -815,9 +835,6 @@ async def compare_datasets(body: CompareReq, cache: CacheService = Depends(get_c
             "mean_diff_pct": mean_diff_pct,
         }
     return result
-
-
-# ── Insights ──────────────────────────────────────────────────────────────────
 
 
 @router.post("/generate-insights/{dataset_id}")
@@ -847,9 +864,6 @@ async def get_insights(dataset_id: str, cache: CacheService = Depends(get_cache)
     if not data:
         raise HTTPException(404, "Insights not found. Run /generate-insights first.")
     return data
-
-
-# ── Chat ──────────────────────────────────────────────────────────────────────
 
 
 @router.post("/chat")
@@ -898,9 +912,6 @@ async def chat_stream(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-# ── Query ─────────────────────────────────────────────────────────────────────
-
-
 @router.post("/query/{dataset_id}")
 async def query(
     dataset_id: str, body: QueryReq, cache: CacheService = Depends(get_cache)
@@ -930,9 +941,6 @@ async def query(
     }
 
 
-# ── Query Debugger ────────────────────────────────────────────────────────────
-
-
 class QueryDebugReq(BaseModel):
     dataset_id: str
     code: str
@@ -944,7 +952,6 @@ async def query_debug_exec(
     body: QueryDebugReq,
     cache: CacheService = Depends(get_cache),
 ):
-    """Execute user-edited Pandas code against a dataset (query debugger)."""
     if not await cache.get_schema(dataset_id):
         raise HTTPException(404, f"Dataset '{dataset_id}' not found.")
 
@@ -980,14 +987,29 @@ async def query_debug_exec(
         p.join(timeout=2.0)
         _kill()
         if result.get("status") == "error":
-            return {"success": False, "error": result.get("error"), "rows": [], "columns": []}
+            return {
+                "success": False,
+                "error": result.get("error"),
+                "rows": [],
+                "columns": [],
+            }
         rdf = result.get("data")
     except queue.Empty:
         _kill()
-        return {"success": False, "error": "Execution timeout (10s exceeded).", "rows": [], "columns": []}
+        return {
+            "success": False,
+            "error": "Execution timeout (10s exceeded).",
+            "rows": [],
+            "columns": [],
+        }
     except Exception as e:
         _kill()
-        return {"success": False, "error": f"{type(e).__name__}: {e}", "rows": [], "columns": []}
+        return {
+            "success": False,
+            "error": f"{type(e).__name__}: {e}",
+            "rows": [],
+            "columns": [],
+        }
 
     if rdf is None:
         rdf = pd.DataFrame()
@@ -1005,9 +1027,6 @@ async def query_debug_exec(
         "rows": sanitize_rows(rdf.to_dict("records")),
         "row_count": len(rdf),
     }
-
-
-# ── Charts ────────────────────────────────────────────────────────────────────
 
 
 @router.post("/chart/validate")
@@ -1068,9 +1087,6 @@ async def recommend_charts(dataset_id: str, cache: CacheService = Depends(get_ca
     return {"dataset_id": dataset_id, "recommendations": recommendations}
 
 
-# ── Dashboard ─────────────────────────────────────────────────────────────────
-
-
 @router.post("/dashboard/{dataset_id}")
 async def generate_dashboard(
     dataset_id: str, body: DashboardReq, cache: CacheService = Depends(get_cache)
@@ -1097,9 +1113,6 @@ async def get_dashboard(dataset_id: str, cache: CacheService = Depends(get_cache
     if not data:
         raise HTTPException(404, "Dashboard not found. Run POST /dashboard first.")
     return data
-
-
-# ── React Layout Generator ────────────────────────────────────────────────────
 
 
 @router.post("/react/dashboard-layout")
@@ -1255,9 +1268,6 @@ async def get_api_integration_guide():
     }
 
 
-# ── Report ────────────────────────────────────────────────────────────────────
-
-
 @router.post("/report/{dataset_id}")
 async def generate_report(
     dataset_id: str, body: ReportReq, cache: CacheService = Depends(get_cache)
@@ -1293,9 +1303,6 @@ async def run_full_pipeline(dataset_id: str, cache: CacheService = Depends(get_c
         queue="low",
     )
     return {"dataset_id": dataset_id, "task_id": task.id, "status": "pending"}
-
-
-# ── Export ────────────────────────────────────────────────────────────────────
 
 
 @router.get("/export/{dataset_id}/csv")
@@ -1342,10 +1349,7 @@ async def export_insights_markdown(
 
 
 @router.get("/datasets/{dataset_id}/report")
-async def get_report(
-    dataset_id: str, cache: CacheService = Depends(get_cache)
-):
-    """Return the structured Report Agent JSON for a dataset."""
+async def get_report(dataset_id: str, cache: CacheService = Depends(get_cache)):
     report = await cache.get_report(dataset_id)
     if not report:
         raise HTTPException(404, "Report not found. Run the full pipeline first.")
@@ -1353,10 +1357,7 @@ async def get_report(
 
 
 @router.get("/export/{dataset_id}/report/pdf")
-async def export_report_pdf(
-    dataset_id: str, cache: CacheService = Depends(get_cache)
-):
-    """Generate and stream a PDF of the report using ReportLab."""
+async def export_report_pdf(dataset_id: str, cache: CacheService = Depends(get_cache)):
     report = await cache.get_report(dataset_id)
     insights = await cache.get_insights(dataset_id)
     if not report and not insights:
@@ -1368,65 +1369,120 @@ async def export_report_pdf(
         from reportlab.lib.units import cm
         from reportlab.lib import colors
         from reportlab.platypus import (
-            SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            HRFlowable,
+            Table,
+            TableStyle,
         )
         from reportlab.lib.enums import TA_LEFT, TA_CENTER
 
         buf = io.BytesIO()
         doc = SimpleDocTemplate(
-            buf, pagesize=A4,
-            leftMargin=2*cm, rightMargin=2*cm,
-            topMargin=2*cm, bottomMargin=2*cm
+            buf,
+            pagesize=A4,
+            leftMargin=2 * cm,
+            rightMargin=2 * cm,
+            topMargin=2 * cm,
+            bottomMargin=2 * cm,
         )
         styles = getSampleStyleSheet()
         accent = colors.HexColor("#6366f1")
         dark = colors.HexColor("#1e1e2e")
 
-        title_style = ParagraphStyle("Title", parent=styles["Title"],
-            fontSize=22, textColor=dark, spaceAfter=6)
-        headline_style = ParagraphStyle("Headline", parent=styles["Normal"],
-            fontSize=11, textColor=accent, spaceAfter=16, leading=16)
-        section_title_style = ParagraphStyle("SectionTitle", parent=styles["Heading2"],
-            fontSize=13, textColor=dark, spaceBefore=18, spaceAfter=6)
-        body_style = ParagraphStyle("Body", parent=styles["Normal"],
-            fontSize=10, textColor=colors.HexColor("#374151"), leading=15, spaceAfter=8)
-        evidence_style = ParagraphStyle("Evidence", parent=styles["Normal"],
-            fontSize=9, textColor=colors.HexColor("#6b7280"), leading=13, leftIndent=12)
-        conclusion_style = ParagraphStyle("Conclusion", parent=styles["Normal"],
-            fontSize=10, textColor=dark, leading=14, leftIndent=12,
-            borderPad=4, backColor=colors.HexColor("#f5f3ff"))
-        meta_style = ParagraphStyle("Meta", parent=styles["Normal"],
-            fontSize=8, textColor=colors.grey, spaceBefore=2)
+        title_style = ParagraphStyle(
+            "Title", parent=styles["Title"], fontSize=22, textColor=dark, spaceAfter=6
+        )
+        headline_style = ParagraphStyle(
+            "Headline",
+            parent=styles["Normal"],
+            fontSize=11,
+            textColor=accent,
+            spaceAfter=16,
+            leading=16,
+        )
+        section_title_style = ParagraphStyle(
+            "SectionTitle",
+            parent=styles["Heading2"],
+            fontSize=13,
+            textColor=dark,
+            spaceBefore=18,
+            spaceAfter=6,
+        )
+        body_style = ParagraphStyle(
+            "Body",
+            parent=styles["Normal"],
+            fontSize=10,
+            textColor=colors.HexColor("#374151"),
+            leading=15,
+            spaceAfter=8,
+        )
+        evidence_style = ParagraphStyle(
+            "Evidence",
+            parent=styles["Normal"],
+            fontSize=9,
+            textColor=colors.HexColor("#6b7280"),
+            leading=13,
+            leftIndent=12,
+        )
+        conclusion_style = ParagraphStyle(
+            "Conclusion",
+            parent=styles["Normal"],
+            fontSize=10,
+            textColor=dark,
+            leading=14,
+            leftIndent=12,
+            borderPad=4,
+            backColor=colors.HexColor("#f5f3ff"),
+        )
+        meta_style = ParagraphStyle(
+            "Meta",
+            parent=styles["Normal"],
+            fontSize=8,
+            textColor=colors.grey,
+            spaceBefore=2,
+        )
 
         story = []
-        dataset_name = report.get("title", "Data Intelligence Report") if report else "Report"
+        dataset_name = (
+            report.get("title", "Data Intelligence Report") if report else "Report"
+        )
 
-        # Header
         story.append(Paragraph(dataset_name, title_style))
-        story.append(Paragraph(f"Generated {__import__('datetime').date.today().strftime('%B %d, %Y')}  |  Lumen Data Intelligence Platform", meta_style))
-        story.append(Spacer(1, 0.3*cm))
+        story.append(
+            Paragraph(
+                f"Generated {__import__('datetime').date.today().strftime('%B %d, %Y')}  |  Lumen Data Intelligence Platform",
+                meta_style,
+            )
+        )
+        story.append(Spacer(1, 0.3 * cm))
         story.append(HRFlowable(width="100%", thickness=1.5, color=accent))
-        story.append(Spacer(1, 0.4*cm))
+        story.append(Spacer(1, 0.4 * cm))
 
-        # Executive headline
         if report and report.get("executive_headline"):
             story.append(Paragraph(report["executive_headline"], headline_style))
 
-        # Sections
         if report and report.get("sections"):
             for section in sorted(report["sections"], key=lambda s: s.get("order", 99)):
                 story.append(Paragraph(section.get("title", ""), section_title_style))
                 if section.get("key_metric"):
-                    story.append(Paragraph(f"Key metric: {section['key_metric']}", evidence_style))
-                    story.append(Spacer(1, 0.2*cm))
+                    story.append(
+                        Paragraph(
+                            f"Key metric: {section['key_metric']}", evidence_style
+                        )
+                    )
+                    story.append(Spacer(1, 0.2 * cm))
 
-                # Strip markdown and render content
                 import re
+
                 raw_content = section.get("content", "")
                 raw_content = re.sub(r"#{1,6}\s*", "", raw_content)
                 raw_content = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", raw_content)
                 raw_content = re.sub(r"\*(.*?)\*", r"<i>\1</i>", raw_content)
-                raw_content = re.sub(r"`(.*?)`", r"<font name='Courier'>\1</font>", raw_content)
+                raw_content = re.sub(
+                    r"`(.*?)`", r"<font name='Courier'>\1</font>", raw_content
+                )
                 for para in raw_content.split("\n\n"):
                     if para.strip():
                         try:
@@ -1435,31 +1491,60 @@ async def export_report_pdf(
                             story.append(Paragraph(para.strip()[:300], body_style))
 
                 if section.get("evidence"):
-                    story.append(Spacer(1, 0.2*cm))
-                    story.append(Paragraph("Supporting Evidence:", ParagraphStyle("EvidLabel", parent=evidence_style, textColor=dark, fontName="Helvetica-Bold")))
+                    story.append(Spacer(1, 0.2 * cm))
+                    story.append(
+                        Paragraph(
+                            "Supporting Evidence:",
+                            ParagraphStyle(
+                                "EvidLabel",
+                                parent=evidence_style,
+                                textColor=dark,
+                                fontName="Helvetica-Bold",
+                            ),
+                        )
+                    )
                     for ev in section["evidence"][:4]:
                         story.append(Paragraph(f"• {ev}", evidence_style))
 
                 if section.get("conclusion"):
-                    story.append(Spacer(1, 0.2*cm))
-                    story.append(Paragraph(f"Conclusion: {section['conclusion']}", conclusion_style))
+                    story.append(Spacer(1, 0.2 * cm))
+                    story.append(
+                        Paragraph(
+                            f"Conclusion: {section['conclusion']}", conclusion_style
+                        )
+                    )
 
-                story.append(Spacer(1, 0.3*cm))
-                story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb")))
+                story.append(Spacer(1, 0.3 * cm))
+                story.append(
+                    HRFlowable(
+                        width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb")
+                    )
+                )
 
-        # Fallback: use insights if no report
         elif insights and insights.get("insights"):
             for ins in insights["insights"][:8]:
-                story.append(Paragraph(ins.get("title", "Insight"), section_title_style))
+                story.append(
+                    Paragraph(ins.get("title", "Insight"), section_title_style)
+                )
                 story.append(Paragraph(ins.get("description", ""), body_style))
                 if ins.get("business_impact"):
-                    story.append(Paragraph(f"Business impact: {ins['business_impact']}", evidence_style))
-                story.append(Spacer(1, 0.3*cm))
+                    story.append(
+                        Paragraph(
+                            f"Business impact: {ins['business_impact']}", evidence_style
+                        )
+                    )
+                story.append(Spacer(1, 0.3 * cm))
 
-        # Footer
-        story.append(Spacer(1, 1*cm))
-        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb")))
-        story.append(Paragraph("End of document — AI output generated by Lumen Data Intelligence Platform", meta_style))
+        story.append(Spacer(1, 1 * cm))
+        story.append(
+            HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb"))
+        )
+        story.append(
+            Paragraph(
+                "End of document — AI output generated by Lumen Data Intelligence Platform",
+                meta_style,
+            )
+        )
 
         doc.build(story)
         buf.seek(0)
@@ -1467,14 +1552,15 @@ async def export_report_pdf(
         return StreamingResponse(
             buf,
             media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename={safe_name}_report.pdf"},
+            headers={
+                "Content-Disposition": f"attachment; filename={safe_name}_report.pdf"
+            },
         )
 
     except ImportError:
-        raise HTTPException(500, "PDF export requires 'reportlab'. Add it to requirements.txt.")
-
-
-# ── Task + Cache ──────────────────────────────────────────────────────────────
+        raise HTTPException(
+            500, "PDF export requires 'reportlab'. Add it to requirements.txt."
+        )
 
 
 @router.get("/task/{task_id}")
@@ -1497,7 +1583,6 @@ async def task_status(task_id: str):
         "progress": progress,
     }
     if state == "SUCCESS":
-        # Deep-sanitize to convert numpy/pandas objects to JSON-safe primitives
         resp["result"] = _convert(getattr(rec, "result", None))
     elif state == "FAILURE":
         resp["error"] = getattr(rec, "error", "Unknown error")
@@ -1519,11 +1604,9 @@ async def system_stats(llm: LLMService = Depends(get_llm)):
 
 @router.get("/metrics/llm")
 async def llm_metrics(llm: LLMService = Depends(get_llm)):
-    """Structured LLM metrics for the Settings page."""
     from backend.config import settings as _s
 
     stats = llm.get_stats()
-    # Identify which key source is active
     if _s.OPENAI_API_KEY:
         key_source = "openai"
     elif _s.ANTHROPIC_API_KEY:
@@ -1584,7 +1667,6 @@ class SettingsBody(BaseModel):
 
 @router.post("/settings")
 async def update_settings(body: SettingsBody):
-    """Update in-memory defaults. Clients persist locally; backend honors on next call."""
     from backend.config import settings as _s
 
     if body.provider and body.provider in ("openai", "anthropic", "gemini", "groq"):

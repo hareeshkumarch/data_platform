@@ -1,10 +1,3 @@
-"""End-to-end backend tests for the Lumen data platform API.
-
-Covers health, settings, chat (LLM via provider API keys), SSE streaming,
-dataset seed-demo (async task flow), warehouse SQL, analytics, chart config,
-system/metrics, and generate-insights flow.
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,9 +9,6 @@ import requests
 
 BASE = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api/v1"
-
-
-# ---------------- Health & config ----------------
 
 
 def test_health():
@@ -38,9 +28,6 @@ def test_providers():
     assert data["default_provider"] == "openai"
 
 
-# ---------------- LLM chat ----------------
-
-
 def test_chat_openai_real_reply():
     payload = {
         "prompt": "Say exactly hello world",
@@ -50,7 +37,7 @@ def test_chat_openai_real_reply():
     r = requests.post(f"{API}/chat", json=payload, timeout=120)
     assert r.status_code == 200, r.text
     body = r.json()
-    # Accept either {reply:..} or {response:..} or {content:..}
+
     text = (
         body.get("reply")
         or body.get("response")
@@ -62,7 +49,6 @@ def test_chat_openai_real_reply():
 
 
 def test_chat_stream_sse():
-    # chat-stream is GET with query params in this backend
     params = {
         "prompt": "Say hello in 3 words.",
         "provider": "openai",
@@ -90,13 +76,9 @@ def test_chat_stream_sse():
                     if "token" in parsed or "content" in parsed or "delta" in parsed:
                         got_token = True
                 except Exception:
-                    # plain text chunk still counts as a token delivery
                     got_token = True
     assert got_token, "no streamed tokens received"
     assert got_done, "SSE did not emit [DONE] marker"
-
-
-# ---------------- Datasets ----------------
 
 
 @pytest.fixture(scope="module")
@@ -104,7 +86,7 @@ def seeded_dataset_id() -> str:
     r = requests.post(f"{API}/datasets/seed-demo", timeout=60)
     assert r.status_code in (200, 201, 202), r.text
     body = r.json()
-    # Idempotent reuse path: task_id=null, dataset_id already present
+
     if (
         body.get("status") == "success"
         and body.get("task_id") is None
@@ -113,7 +95,7 @@ def seeded_dataset_id() -> str:
         return body["dataset_id"]
     task_id = body.get("task_id") or body.get("id")
     assert task_id, f"no task id in seed response: {body}"
-    # Poll task
+
     deadline = time.time() + 60
     status = None
     while time.time() < deadline:
@@ -131,14 +113,14 @@ def seeded_dataset_id() -> str:
         if status in ("failed", "error", "FAILURE"):
             pytest.fail(f"seed task failed: {tb}")
         time.sleep(1.0)
-    # Look up dataset id via /datasets list
+
     lr = requests.get(f"{API}/datasets", timeout=30)
     assert lr.status_code == 200, lr.text
     items = lr.json()
     if isinstance(items, dict):
         items = items.get("datasets") or items.get("items") or []
     assert len(items) >= 1, f"no datasets listed: {items}"
-    # pick the most recently-seeded entry that has a `columns` field (cached schema)
+
     with_cols = [d for d in items if d.get("columns")]
     ds = with_cols[-1] if with_cols else items[-1]
     return ds.get("id") or ds.get("dataset_id") or ds.get("table_name")
@@ -162,9 +144,6 @@ def test_dataset_preview(seeded_dataset_id):
     body = r.json()
     rows = body.get("rows") or body.get("data") or body
     assert rows and len(rows) > 0, f"empty preview: {body}"
-
-
-# ---------------- Warehouse ----------------
 
 
 def test_warehouse_tables():
@@ -193,9 +172,6 @@ def test_warehouse_query():
     assert len(rows) > 0, f"no rows from SQL: {body}"
 
 
-# ---------------- Analytics & chart ----------------
-
-
 def test_analytics_profile(seeded_dataset_id):
     r = requests.post(
         f"{API}/analytics/{seeded_dataset_id}",
@@ -218,11 +194,7 @@ def test_chart_generate(seeded_dataset_id):
     assert body, f"empty chart config: {body}"
 
 
-# ---------------- Settings persistence ----------------
-
-
 def test_settings_persist_and_read_back():
-    # Switch to anthropic
     r = requests.post(
         f"{API}/settings",
         json={"provider": "anthropic", "model": "claude-sonnet-4-5-20250929"},
@@ -233,7 +205,6 @@ def test_settings_persist_and_read_back():
     assert pr.get("default_provider") == "anthropic", pr
     assert pr.get("default_model") == "claude-sonnet-4-5-20250929", pr
 
-    # revert to openai
     r2 = requests.post(
         f"{API}/settings",
         json={"provider": "openai", "model": "gpt-5.2"},
@@ -242,9 +213,6 @@ def test_settings_persist_and_read_back():
     assert r2.status_code in (200, 201)
     pr2 = requests.get(f"{API}/settings/providers", timeout=30).json()
     assert pr2.get("default_provider") == "openai"
-
-
-# ---------------- System/metrics ----------------
 
 
 def test_system_stats():
@@ -259,9 +227,6 @@ def test_llm_metrics():
     assert r.status_code == 200, r.text
     body = r.json()
     assert isinstance(body, dict)
-
-
-# ---------------- Generate insights ----------------
 
 
 def test_generate_insights(seeded_dataset_id):

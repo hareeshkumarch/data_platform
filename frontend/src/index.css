@@ -170,12 +170,12 @@
   .animate-slide-in-right { animation: slide-in-right 0.35s var(--transition-smooth) both; }
   .animate-scale-in { animation: scale-in 0.35s var(--transition-spring) both; }
   .animate-pop-in { animation: pop-in 0.45s var(--transition-spring) both; }
-  .animate-float { animation: float 6s ease-in-out infinite; }
+  .animate-float { animation: float 8s ease-in-out infinite; }
   .animate-pulse-soft { animation: pulse-soft 2.4s ease-in-out infinite; }
-  .animate-glow-ring { animation: glow-ring 2.2s ease-in-out infinite; }
+  .animate-glow-ring { animation: glow-ring 3s ease-in-out infinite; }
   .animate-gradient-shift {
     background-size: 200% 200%;
-    animation: gradient-shift 8s ease infinite;
+    animation: gradient-shift 12s ease infinite;
   }
   .animate-shimmer {
     background: linear-gradient(90deg, transparent, hsl(var(--muted-foreground) / 0.08), transparent);

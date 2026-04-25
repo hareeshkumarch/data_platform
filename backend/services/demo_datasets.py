@@ -1,11 +1,3 @@
-"""Synthetic demo dataset generators.
-
-Each generator yields a pandas DataFrame and a human-readable name. The
-resulting CSV is persisted to disk + registered with the existing
-ingestion pipeline so the rest of Lumen (preview, schema, analytics)
-treats it like any user-uploaded dataset.
-"""
-
 from __future__ import annotations
 
 import random
@@ -15,7 +7,6 @@ from typing import Callable, Dict, Tuple
 import numpy as np
 import pandas as pd
 
-
 Generator = Callable[[int, int], pd.DataFrame]
 
 
@@ -23,11 +14,6 @@ def _seed(seed: int | None) -> None:
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
-
-
-# ---------------------------------------------------------------------------
-# Sales performance
-# ---------------------------------------------------------------------------
 
 
 def _sales(rows: int = 420, seed: int = 7) -> pd.DataFrame:
@@ -62,11 +48,6 @@ def _sales(rows: int = 420, seed: int = 7) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(records)
-
-
-# ---------------------------------------------------------------------------
-# E-commerce order log
-# ---------------------------------------------------------------------------
 
 
 def _ecommerce(rows: int = 600, seed: int = 11) -> pd.DataFrame:
@@ -105,11 +86,6 @@ def _ecommerce(rows: int = 600, seed: int = 11) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(records)
-
-
-# ---------------------------------------------------------------------------
-# Marketing campaigns
-# ---------------------------------------------------------------------------
 
 
 def _marketing(rows: int = 280, seed: int = 19) -> pd.DataFrame:
@@ -152,11 +128,6 @@ def _marketing(rows: int = 280, seed: int = 19) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-# ---------------------------------------------------------------------------
-# Finance / portfolio
-# ---------------------------------------------------------------------------
-
-
 def _finance(rows: int = 520, seed: int = 23) -> pd.DataFrame:
     _seed(seed)
     tickers = [
@@ -195,11 +166,6 @@ def _finance(rows: int = 520, seed: int = 23) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(records)
-
-
-# ---------------------------------------------------------------------------
-# HR / people analytics
-# ---------------------------------------------------------------------------
 
 
 def _hr(rows: int = 300, seed: int = 29) -> pd.DataFrame:
@@ -242,11 +208,6 @@ def _hr(rows: int = 300, seed: int = 29) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-# ---------------------------------------------------------------------------
-# Customer churn
-# ---------------------------------------------------------------------------
-
-
 def _customers(rows: int = 500, seed: int = 31) -> pd.DataFrame:
     _seed(seed)
     plans = ["free", "starter", "pro", "business", "enterprise"]
@@ -284,11 +245,6 @@ def _customers(rows: int = 500, seed: int = 31) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-# ---------------------------------------------------------------------------
-# IoT sensor readings
-# ---------------------------------------------------------------------------
-
-
 def _iot(rows: int = 1000, seed: int = 37) -> pd.DataFrame:
     _seed(seed)
     sensors = [f"sensor-{i:02d}" for i in range(1, 9)]
@@ -319,10 +275,6 @@ def _iot(rows: int = 1000, seed: int = 37) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
 GENERATORS: Dict[str, Tuple[str, Generator]] = {
     "sales": ("Sales Performance (Sample)", _sales),
     "ecommerce": ("E-commerce Orders (Sample)", _ecommerce),
@@ -335,7 +287,6 @@ GENERATORS: Dict[str, Tuple[str, Generator]] = {
 
 
 def list_demo_kinds() -> list[dict]:
-    """Catalogue surfaced to the UI."""
     descriptions: Dict[str, str] = {
         "sales": "Monthly revenue, cost, customers and deals by region, product & segment.",
         "ecommerce": "Order-level data with status, categories, discounts, ratings.",
@@ -352,11 +303,10 @@ def list_demo_kinds() -> list[dict]:
 
 
 def generate_demo(kind: str) -> Tuple[str, bytes]:
-    """Return (human-readable filename, csv bytes) for the requested kind."""
     if kind not in GENERATORS:
         raise KeyError(f"Unknown demo dataset: {kind}")
     _label, fn = GENERATORS[kind]
-    df = fn()  # generators use their own defaults
+    df = fn()
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     filename = f"{kind}_sample.csv"
     return filename, csv_bytes

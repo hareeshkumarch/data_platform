@@ -1,9 +1,3 @@
-"""Server-side conversation persistence (Postgres).
-
-Offers a thin CRUD surface that mirrors the shape of the client-side
-``useQueryStore`` so the frontend can sync transparently.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -105,17 +99,7 @@ async def upsert_conversation(body: ConversationBody) -> Dict[str, Any]:
     messages = [m.model_dump() for m in body.messages]
     with engine.begin() as conn:
         conn.execute(
-            text(
-                """
-            INSERT INTO conversations (id, title, mode, updated_at, messages_json)
-            VALUES (:id, :title, :mode, :updated_at, CAST(:messages_json AS JSON))
-            ON CONFLICT (id) DO UPDATE
-              SET title = EXCLUDED.title,
-                  mode = EXCLUDED.mode,
-                  updated_at = EXCLUDED.updated_at,
-                  messages_json = EXCLUDED.messages_json
-            """
-            ),
+            text(),
             {
                 "id": body.id,
                 "title": body.title,
@@ -134,7 +118,28 @@ async def delete_conversation(conversation_id: str) -> Dict[str, Any]:
         conn.execute(
             text("DELETE FROM conversations WHERE id = :id"), {"id": conversation_id}
         )
+
+    try:
+        from backend.services.cache_service import get_cache
+
+        cache = get_cache()
+        await cache.delete(f"memory:{conversation_id}")
+    except Exception:
+        pass
     return {"id": conversation_id, "deleted": True}
+
+
+@conversations_router.post("/{conversation_id}/reset-context")
+async def reset_conversation_context(conversation_id: str) -> Dict[str, Any]:
+    try:
+        from backend.services.cache_service import get_cache
+
+        cache = get_cache()
+        memory_key = f"memory:{conversation_id}"
+        await cache.delete(memory_key)
+    except Exception:
+        pass
+    return {"id": conversation_id, "context_reset": True}
 
 
 def _to_json(value: Any) -> str:

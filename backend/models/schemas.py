@@ -165,3 +165,16 @@ class RAGDocument(BaseModel):
     doc_type: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None
+
+
+class StandardResponse(BaseModel):
+    success: bool = True
+    data: Any = None
+    meta: Optional[Dict[str, Any]] = None
+
+
+class StandardErrorResponse(BaseModel):
+    success: bool = False
+    detail: str
+    error_type: Optional[str] = None
+    field_errors: Optional[Dict[str, str]] = None

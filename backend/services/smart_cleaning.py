@@ -1,25 +1,3 @@
-"""Type-aware smart cleaning suggestions and preview engine.
-
-Unlike the rule-based ``cleaning_service`` (which applies an operation list),
-this module *inspects* a DataFrame and produces **precise, prioritised
-suggestions** tailored to each column's inferred semantic type (numeric,
-datetime, categorical, boolean, email, url, phone, currency …).
-
-The output is consumed by:
-* ``POST /api/v1/cleaning/suggest/{dataset_id}``  — returns suggestions
-* ``POST /api/v1/cleaning/preview/{dataset_id}`` — dry-run diff
-* ``POST /api/v1/cleaning/apply/{dataset_id}``   — writes cleaned copy
-
-Design goals:
-* **Precision.** Each suggestion carries an `impact` estimate (rows/cells
-  affected) so the UI can surface the biggest wins first.
-* **Safety.** Suggestions are reversible — the apply endpoint writes a *new*
-  dataset id so users never overwrite their upload.
-* **Type-awareness.** Impute strategy adapts to skewness, trimming only fires
-  when leading/trailing whitespace is actually present, near-duplicate
-  categorical values use normalised-edit-distance (not raw string equality).
-"""
-
 from __future__ import annotations
 
 import re
@@ -29,25 +7,24 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from backend.utils.data_utils import (
+    EMAIL_RE as _EMAIL_RE,
+    URL_RE as _URL_RE,
+    PHONE_RE as _PHONE_RE,
+    CURRENCY_RE as _CURRENCY_RE,
+    cleaning_fill_missing,
+    cleaning_trim_strings,
+    cleaning_standardize_case,
+    cleaning_normalize_whitespace,
+    cleaning_coerce_types,
+    cleaning_clip_values,
+)
 
-# ---------------------------------------------------------------------------
-# Semantic type inference
-# ---------------------------------------------------------------------------
-
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_URL_RE = re.compile(r"^(https?://|www\.)[^\s]+$", re.IGNORECASE)
-_PHONE_RE = re.compile(r"^[\s\d+\-().]{7,}$")
-_CURRENCY_RE = re.compile(r"^[\s$€£¥₹]*-?\d[\d,.\s]*[%]?$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-]{4,}$")
 _BOOL_LIKE = {"true", "false", "yes", "no", "y", "n", "0", "1", "t", "f"}
 
 
 def _detect_semantic_type(series: pd.Series, inferred: str) -> str:
-    """Refine a column's type from the stored ``inferred_type`` using heuristics.
-
-    Returns one of: numeric, datetime, boolean, email, url, phone, currency,
-    identifier, categorical, text.
-    """
     if inferred == "numeric":
         return "numeric"
     if inferred == "datetime":
@@ -64,11 +41,9 @@ def _detect_semantic_type(series: pd.Series, inferred: str) -> str:
     if len(non_empty) == 0:
         return "categorical"
 
-    # Boolean-ish text
     if non_empty.isin(_BOOL_LIKE).mean() > 0.9:
         return "boolean"
 
-    # Pattern-based semantic refinement
     patterns = {
         "email": _EMAIL_RE,
         "url": _URL_RE,
@@ -79,38 +54,29 @@ def _detect_semantic_type(series: pd.Series, inferred: str) -> str:
         if non_empty.str.match(regex).mean() > 0.8:
             return label
 
-    # High-cardinality short alphanumeric tokens → identifier
     unique_ratio = series.nunique(dropna=True) / max(len(series), 1)
     if unique_ratio > 0.9 and sample.str.match(_ID_RE).mean() > 0.9:
         return "identifier"
 
-    # Otherwise categorical vs free-form text
     if series.nunique(dropna=True) <= max(50, int(len(series) * 0.05)):
         return "categorical"
     return "text"
 
 
-# ---------------------------------------------------------------------------
-# Suggestion records
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class Suggestion:
-    """A single cleaning recommendation."""
-
     id: str
     column: Optional[str]
     op: str
     label: str
     description: str
-    severity: str  # "critical" | "warning" | "info"
-    category: str  # "missing" | "type" | "duplicate" | "outlier" | "format" …
+    severity: str
+    category: str
     semantic_type: str
     impact: Dict[str, Any] = field(default_factory=dict)
     params: Dict[str, Any] = field(default_factory=dict)
     reversible: bool = True
-    auto_safe: bool = False  # whether it's safe to apply without user review
+    auto_safe: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -129,13 +95,7 @@ class Suggestion:
         }
 
 
-# ---------------------------------------------------------------------------
-# Suggestion builders (per type)
-# ---------------------------------------------------------------------------
-
-
 def _sid(*parts: Any) -> str:
-    """Build a stable suggestion id from its key parts."""
     return "::".join(str(p) for p in parts if p is not None)
 
 
@@ -148,7 +108,6 @@ def _missing_suggestions(
         return out
     null_pct = round(null_count / n * 100, 2)
 
-    # Drop the column if it's almost entirely empty — nothing else is salvageable.
     if null_pct >= 70:
         return [
             Suggestion(
@@ -168,10 +127,8 @@ def _missing_suggestions(
             )
         ]
 
-    # Type-aware imputation
     if semantic == "numeric":
         ns = series.dropna()
-        # Use median when the distribution is skewed; mean otherwise.
         try:
             skew = float(ns.skew()) if len(ns) > 2 else 0.0
         except Exception:
@@ -236,13 +193,13 @@ def _missing_suggestions(
                 auto_safe=null_pct < 10,
             )
         )
-    else:  # free-form text
+    else:
         out.append(
             Suggestion(
                 id=_sid("fill_const", col),
                 column=col,
                 op="fill_missing",
-                label=f"Fill `{col}` with `\"unknown\"`",
+                label=f'Fill `{col}` with `"unknown"`',
                 description=(
                     f"{null_count} missing text values ({null_pct}%). "
                     "Mode isn't meaningful for free text; use an explicit sentinel."
@@ -257,13 +214,14 @@ def _missing_suggestions(
     return out
 
 
-def _numeric_suggestions(col: str, series: pd.Series, semantic: str) -> List[Suggestion]:
+def _numeric_suggestions(
+    col: str, series: pd.Series, semantic: str
+) -> List[Suggestion]:
     out: List[Suggestion] = []
     s = series.dropna()
     if s.empty:
         return out
 
-    # Outlier detection — flag, don't auto-apply.
     q1, q3 = s.quantile(0.25), s.quantile(0.75)
     iqr = q3 - q1
     if iqr > 0:
@@ -284,12 +242,15 @@ def _numeric_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sug
                     severity="warning" if pct >= 3 else "info",
                     category="outlier",
                     semantic_type=semantic,
-                    impact={"rows_affected": out_count, "lower": float(lo), "upper": float(hi)},
+                    impact={
+                        "rows_affected": out_count,
+                        "lower": float(lo),
+                        "upper": float(hi),
+                    },
                     params={"min": float(lo), "max": float(hi)},
                 )
             )
 
-    # Near-zero variance — often safe to drop.
     if s.nunique() <= 1:
         out.append(
             Suggestion(
@@ -307,7 +268,6 @@ def _numeric_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sug
             )
         )
 
-    # Negative values where historically all positive — hint only.
     if (s < 0).any() and (s > 0).mean() > 0.95:
         neg = int((s < 0).sum())
         out.append(
@@ -337,7 +297,6 @@ def _text_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sugges
     if s.empty:
         return out
 
-    # Leading/trailing whitespace — only fires when actually present.
     dirty = int((s != s.str.strip()).sum())
     if dirty > 0:
         out.append(
@@ -356,7 +315,6 @@ def _text_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sugges
             )
         )
 
-    # Case inconsistency — flag only categorical/identifier-like columns
     if semantic in ("categorical", "email", "boolean", "identifier"):
         lowered = s.str.lower()
         if lowered.nunique() < s.nunique():
@@ -381,14 +339,10 @@ def _text_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sugges
                 )
             )
 
-    # Near-duplicate categories (normalised whitespace + case)
     if semantic in ("categorical", "identifier") and s.nunique() <= 500:
         normalised = s.str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
         collapsed = s.nunique() - normalised.nunique()
-        if collapsed > 0 and collapsed != (
-            # Don't double-fire with the pure case suggestion
-            s.nunique() - s.str.lower().nunique()
-        ):
+        if collapsed > 0 and collapsed != (s.nunique() - s.str.lower().nunique()):
             out.append(
                 Suggestion(
                     id=_sid("normalize_cats", col),
@@ -407,7 +361,6 @@ def _text_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sugges
                 )
             )
 
-    # Format validation — email / url / phone
     if semantic == "email":
         invalid = int((~s.str.match(_EMAIL_RE)).sum())
         if invalid > 0:
@@ -444,7 +397,9 @@ def _text_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sugges
             )
     elif semantic == "phone":
         digits_only = s.str.replace(r"\D", "", regex=True)
-        invalid = int(((digits_only.str.len() < 7) | (digits_only.str.len() > 15)).sum())
+        invalid = int(
+            ((digits_only.str.len() < 7) | (digits_only.str.len() > 15)).sum()
+        )
         if invalid > 0:
             out.append(
                 Suggestion(
@@ -464,7 +419,9 @@ def _text_suggestions(col: str, series: pd.Series, semantic: str) -> List[Sugges
     return out
 
 
-def _datetime_suggestions(col: str, series: pd.Series, semantic: str) -> List[Suggestion]:
+def _datetime_suggestions(
+    col: str, series: pd.Series, semantic: str
+) -> List[Suggestion]:
     out: List[Suggestion] = []
     parsed = pd.to_datetime(series, errors="coerce")
     coerced = int(parsed.isna().sum() - series.isna().sum())
@@ -487,7 +444,6 @@ def _datetime_suggestions(col: str, series: pd.Series, semantic: str) -> List[Su
             )
         )
 
-    # Future timestamps (often bad entries in historical data)
     valid = parsed.dropna()
     if not valid.empty:
         try:
@@ -515,7 +471,9 @@ def _datetime_suggestions(col: str, series: pd.Series, semantic: str) -> List[Su
     return out
 
 
-def _boolean_suggestions(col: str, series: pd.Series, semantic: str) -> List[Suggestion]:
+def _boolean_suggestions(
+    col: str, series: pd.Series, semantic: str
+) -> List[Suggestion]:
     if series.dtype == bool:
         return []
     return [
@@ -563,22 +521,13 @@ def _dataset_level_suggestions(df: pd.DataFrame) -> List[Suggestion]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Public entry points
-# ---------------------------------------------------------------------------
-
-
-def suggest_cleaning(df: pd.DataFrame, schema_cols: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return a ranked list of cleaning suggestions for the given DataFrame.
-
-    The schema hint comes from the stored dataset schema so we don't re-infer
-    column types on every call — we only *refine* them (e.g. text → email).
-    """
+def suggest_cleaning(
+    df: pd.DataFrame, schema_cols: List[Dict[str, Any]]
+) -> Dict[str, Any]:
     n = max(len(df), 1)
     suggestions: List[Suggestion] = []
     semantic_map: Dict[str, str] = {}
 
-    # Dataset-level (duplicates etc.)
     suggestions.extend(_dataset_level_suggestions(df))
 
     for col_meta in schema_cols:
@@ -590,10 +539,8 @@ def suggest_cleaning(df: pd.DataFrame, schema_cols: List[Dict[str, Any]]) -> Dic
         semantic = _detect_semantic_type(series, inferred)
         semantic_map[col] = semantic
 
-        # 1) Missing data handling
         suggestions.extend(_missing_suggestions(col, series, semantic, n))
 
-        # 2) Type-specific suggestions
         if semantic == "numeric":
             suggestions.extend(_numeric_suggestions(col, series, semantic))
         elif semantic == "datetime":
@@ -603,7 +550,6 @@ def suggest_cleaning(df: pd.DataFrame, schema_cols: List[Dict[str, Any]]) -> Dic
         else:
             suggestions.extend(_text_suggestions(col, series, semantic))
 
-    # Rank: critical → warning → info, then by cells_modified/rows_affected desc.
     severity_rank = {"critical": 0, "warning": 1, "info": 2}
 
     def _impact_weight(s: Suggestion) -> int:
@@ -635,15 +581,9 @@ def suggest_cleaning(df: pd.DataFrame, schema_cols: List[Dict[str, Any]]) -> Dic
     }
 
 
-# ---------------------------------------------------------------------------
-# Apply / preview
-# ---------------------------------------------------------------------------
-
-
 def _apply_operation(
     df: pd.DataFrame, op: str, column: Optional[str], params: Dict[str, Any]
 ) -> Tuple[pd.DataFrame, int]:
-    """Apply a single cleaning op and return (new_df, cells_modified)."""
     if op == "drop_duplicates":
         before = len(df)
         df = df.drop_duplicates(keep="first").reset_index(drop=True)
@@ -664,85 +604,36 @@ def _apply_operation(
     s = df[column]
 
     if op == "fill_missing":
-        strategy = params.get("strategy", "mode")
-        null_mask = s.isna()
-        if not null_mask.any():
-            return df, 0
-        if strategy == "forward":
-            df[column] = s.ffill()
-        elif strategy == "backward":
-            df[column] = s.bfill()
-        elif strategy == "constant":
-            df.loc[null_mask, column] = params.get("value")
-        else:
-            if strategy == "median" and pd.api.types.is_numeric_dtype(s):
-                val = s.median()
-            elif strategy == "mean" and pd.api.types.is_numeric_dtype(s):
-                val = s.mean()
-            elif strategy == "mode":
-                mode_vals = s.mode(dropna=True)
-                val = mode_vals.iloc[0] if not mode_vals.empty else None
-            else:
-                val = None
-            if val is not None:
-                df.loc[null_mask, column] = val
-        return df, int(null_mask.sum())
+        modified = cleaning_fill_missing(
+            df, column, params.get("strategy", "mode"), params.get("value")
+        )
+        return df, modified
 
     if op == "trim_strings":
-        before = s.astype(str)
-        trimmed = before.str.strip()
-        modified = int((before != trimmed).sum())
-        df[column] = trimmed.where(s.notna(), None)
+        modified = cleaning_trim_strings(df, column)
         return df, modified
 
     if op == "standardize_case":
-        mode = params.get("mode", "lower")
-        before = s.astype(str)
-        if mode == "upper":
-            new = before.str.upper()
-        elif mode == "title":
-            new = before.str.title()
-        else:
-            new = before.str.lower()
-        modified = int((before != new).sum())
-        df[column] = new.where(s.notna(), None)
+        modified = cleaning_standardize_case(df, column, params.get("mode", "lower"))
         return df, modified
 
     if op == "normalize_whitespace":
-        before = s.astype(str)
-        new = before.str.strip().str.replace(r"\s+", " ", regex=True)
-        if params.get("lowercase", True):
-            new = new.str.lower()
-        modified = int((before != new).sum())
-        df[column] = new.where(s.notna(), None)
+        modified = cleaning_normalize_whitespace(
+            df, column, params.get("lowercase", True)
+        )
         return df, modified
 
     if op == "coerce_types":
-        dtype = params.get("dtype", "numeric")
-        if dtype == "numeric":
-            new = pd.to_numeric(s, errors="coerce")
-        elif dtype == "datetime":
-            new = pd.to_datetime(s, errors="coerce")
-        elif dtype == "boolean":
-            truthy = {"true", "1", "yes", "y", "t"}
-            new = s.astype(str).str.strip().str.lower().isin(truthy)
-            new = new.where(s.notna(), None)
-        else:
-            new = s.astype(str)
-        modified = int((s.astype(str) != new.astype(str)).sum())
-        df[column] = new
+        modified = cleaning_coerce_types(df, column, params.get("dtype", "numeric"))
         return df, modified
 
     if op == "clip_values":
-        lo = params.get("min")
-        hi = params.get("max")
-        before = s.copy()
-        df[column] = s.clip(lower=lo, upper=hi)
-        modified = int((before != df[column]).sum())
+        modified = cleaning_clip_values(
+            df, column, params.get("min"), params.get("max")
+        )
         return df, modified
 
     if op == "flag_invalid":
-        # Non-destructive: add a sibling boolean column marking invalid rows.
         pattern = params.get("pattern")
         regex = {
             "email": _EMAIL_RE,
@@ -764,14 +655,12 @@ def _apply_operation(
         df[flag_col] = future
         return df, int(future.sum())
 
-    # Unknown op — no-op
     return df, 0
 
 
 def apply_cleaning(
     df: pd.DataFrame, operations: List[Dict[str, Any]]
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """Apply a sequence of cleaning operations and return (df, report)."""
     rows_before = len(df)
     df = df.copy()
     total_modified = 0

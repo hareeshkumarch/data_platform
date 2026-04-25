@@ -6,6 +6,7 @@ import {
   ArrowUp, Bot, UserRound, CheckCircle2, Loader2,
   MessageSquareText, Workflow, Sparkles, Paperclip, History as HistoryIcon,
   ChevronDown, BarChart3, LineChart, AreaChart, PieChart as PieChartIcon,
+  ShieldCheck, Table2, Eye,
 } from "lucide-react";
 import { AnimatedPipeline } from "@/components/agents/AnimatedPipeline";
 
@@ -64,11 +65,15 @@ const Query = () => {
     void hydrateFromServer();
   }, [hydrateFromServer]);
 
-  // Auto-scroll
-  const msgLen = Array.isArray(active?.messages) ? active?.messages?.length : 0;
+  // Auto-scroll (follows both new messages and streaming token updates)
+  const msgLen = Array.isArray(active?.messages) ? active?.messages?.length ?? 0 : 0;
+  const lastMsg = Array.isArray(active?.messages) && active!.messages.length > 0
+    ? active!.messages[active!.messages.length - 1]
+    : null;
+  const streamSignal = `${lastMsg?.id ?? ""}:${(lastMsg?.content ?? "").length}:${lastMsg?.streaming ? 1 : 0}`;
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [msgLen, active?.id]);
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [msgLen, active?.id, streamSignal]);
 
   // Auto-grow textarea
   useEffect(() => {
@@ -85,8 +90,8 @@ const Query = () => {
 
   const ensureConversation = (m: QueryMode) => active?.id ?? newConversation(m);
 
-  const send = () => {
-    let prompt = input.trim();
+  const send = (overridePrompt?: string) => {
+    let prompt = (overridePrompt ?? input).trim();
     if (mode === "pipeline" && !prompt) {
       prompt = "Run full exploratory data analysis pipeline";
     }
@@ -186,42 +191,52 @@ const Query = () => {
           {/* Composer */}
           <div className="border-t border-border bg-background/85 backdrop-blur">
             <div className="mx-auto w-full max-w-[760px] px-3 sm:px-5 py-2.5 sm:py-3.5">
-              {mode === "chat" ? (
-                <div className="relative rounded-2xl bg-card border border-border shadow-soft transition-all focus-within:border-accent/50 focus-within:ring-2 focus-within:ring-accent/15">
-                  <textarea
-                    ref={taRef}
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        send();
-                      }
-                    }}
-                    rows={1}
-                    placeholder="Ask anything…"
-                    className="w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none max-h-[200px]"
-                  />
-                  <div className="flex items-center justify-between px-1.5 pb-1.5">
-                    <div className="flex items-center gap-1">
-                      <ComposerChip icon={Paperclip} label="Attach" disabled title="Coming soon" />
-                      <ComposerChip icon={MessageSquareText} label="Chat" active />
-                    </div>
-                    <button
-                      onClick={send}
-                      disabled={!input.trim() || sending}
-                      className={cn(
-                        "h-8 w-8 rounded-lg flex items-center justify-center transition-all",
-                        "bg-accent text-accent-foreground hover:bg-accent/90 active:scale-95",
-                        "disabled:bg-muted disabled:text-muted-foreground/50 disabled:cursor-not-allowed",
-                      )}
-                      aria-label="Send"
-                    >
-                      <ArrowUp className="h-4 w-4" />
-                    </button>
+              <div className="relative rounded-2xl bg-card border border-border shadow-soft transition-all focus-within:border-accent/50 focus-within:ring-2 focus-within:ring-accent/15">
+                <textarea
+                  ref={taRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      send();
+                    }
+                  }}
+                  rows={1}
+                  placeholder={
+                    mode === "chat"
+                      ? "Ask anything…"
+                      : "Describe the pipeline goal (leave blank for full EDA)…"
+                  }
+                  className="w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none max-h-[200px]"
+                />
+                <div className="flex items-center justify-between px-1.5 pb-1.5">
+                  <div className="flex items-center gap-1">
+                    <ComposerChip icon={Paperclip} label="Attach" disabled title="Coming soon" />
                   </div>
+                  <button
+                    onClick={() => send()}
+                    disabled={sending || (mode === "chat" && !input.trim())}
+                    className={cn(
+                      "h-8 min-w-8 px-2 rounded-lg flex items-center justify-center gap-1.5 transition-all text-[12px] font-medium",
+                      "bg-accent text-accent-foreground hover:bg-accent/90 active:scale-95",
+                      "disabled:bg-muted disabled:text-muted-foreground/50 disabled:cursor-not-allowed",
+                    )}
+                    aria-label="Send"
+                  >
+                    {sending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : mode === "pipeline" ? (
+                      <>
+                        <Workflow className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">Run pipeline</span>
+                      </>
+                    ) : (
+                      <ArrowUp className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
-              ) : null}
+              </div>
               <p className="mt-1.5 text-[11px] text-muted-foreground text-center">
                 System can make mistakes. Verify important results.
               </p>
@@ -304,24 +319,24 @@ const EmptyState = ({ mode, onPick, onSend }: { mode: QueryMode; onPick: (q: str
         </div>
       )}
 
-      {mode === "chat" && (
-        <div className="space-y-3">
-          <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground text-center mb-4">Suggested Actions</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 px-2">
-            {Array.isArray(SUGGESTIONS[mode] || SUGGESTIONS["chat"]) && (SUGGESTIONS[mode] || SUGGESTIONS["chat"]).map((s, i) => (
-              <button
-                key={s}
-                onClick={() => onPick(s)}
-                className="text-left px-4 py-3 rounded-lg border border-border bg-card text-sm font-medium text-foreground hover:border-accent/40 hover:bg-surface/50 hover-lift transition-all animate-fade-in-up flex items-center justify-between group"
-                style={{ animationDelay: `${i * 80}ms` }}
-              >
-                <span className="truncate pr-4">{s}</span>
-                <ArrowUp className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity rotate-45 sm:rotate-45" />
-              </button>
-            ))}
-          </div>
+      <div className="space-y-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground text-center mb-4">
+          {mode === "chat" ? "Suggested Questions" : "Pipeline Goal Ideas"}
+        </h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 px-2">
+          {(SUGGESTIONS[mode] || SUGGESTIONS["chat"]).map((s, i) => (
+            <button
+              key={s}
+              onClick={() => onPick(s)}
+              className="text-left px-4 py-3 rounded-lg border border-border bg-card text-sm font-medium text-foreground hover:border-accent/40 hover:bg-surface/50 hover-lift transition-all animate-fade-in-up flex items-center justify-between group"
+              style={{ animationDelay: `${i * 80}ms` }}
+            >
+              <span className="truncate pr-4">{s}</span>
+              <ArrowUp className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity rotate-45 sm:rotate-45" />
+            </button>
+          ))}
         </div>
-      )}
+      </div>
     </div>
   );
 };
@@ -350,7 +365,7 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
   const running = safeStages.find((s) => s && s.status === "running");
   const completed = safeStages.filter((s) => s && s.status === "done").length;
   const progress = safeStages.length > 0 ? (completed / safeStages.length) * 100 : 0;
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(!allDone);
 
   return (
     <motion.div
@@ -388,13 +403,13 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-bold text-foreground tracking-tight">Intelligence Pipeline</span>
-            <span className="text-[10px] font-mono text-muted-foreground tabular-nums bg-surface px-1.5 py-0.5 rounded border border-border/50">
+            <span className="text-[13px] font-bold text-foreground tracking-tight">Intelligence Pipeline</span>
+            <span className="text-[11px] font-mono text-muted-foreground tabular-nums bg-surface px-1.5 py-0.5 rounded border border-border/50">
               {completed}/{safeStages.length}
             </span>
             {allDone && (
               <motion.span
-                className="text-[10px] text-success font-medium flex items-center gap-1"
+                className="text-[11px] text-success font-medium flex items-center gap-1"
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
               >
@@ -403,10 +418,10 @@ const AgenticPipeline = ({ stages }: { stages: PipelineStage[] }) => {
             )}
             {running && (
               <motion.span
-                className="text-[10px] text-accent font-mono font-semibold"
+                className="text-[11px] text-accent font-mono font-semibold"
                 initial={{ opacity: 0 }}
-                animate={{ opacity: [0.5, 1, 0.5] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
+                animate={{ opacity: [0.7, 1, 0.7] }}
+                transition={{ duration: 2, repeat: Infinity }}
               >
                 {running.name}
               </motion.span>
@@ -492,11 +507,19 @@ const STATUS_DOT: Record<string, string> = {
   skipped: "bg-muted-foreground/40",
 };
 
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;")
+   .replace(/</g, "&lt;")
+   .replace(/>/g, "&gt;")
+   .replace(/"/g, "&quot;")
+   .replace(/'/g, "&#39;");
+
 const renderInlineMarkdown = (text: string) => {
-  // Bold
-  let parsed = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-foreground">$1</strong>');
-  // Italic
+  // Escape first so raw HTML from agent output cannot execute, then apply tiny markdown.
+  let parsed = escapeHtml(text);
+  parsed = parsed.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-foreground">$1</strong>');
   parsed = parsed.replace(/\*(.*?)\*/g, '<em class="italic">$1</em>');
+  parsed = parsed.replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 rounded bg-surface/60 font-mono text-[10.5px]">$1</code>');
   return parsed;
 };
 
@@ -513,8 +536,8 @@ const AgentInsightCards = ({ summaries }: { summaries: AgentSummary[] }) => {
       {/* Header */}
       <div className="flex items-center gap-1.5 px-3 py-2 border-b border-border/60">
         <Workflow className="h-3 w-3 text-muted-foreground" />
-        <span className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground font-semibold">Agent Summary</span>
-        <span className="text-[10px] text-muted-foreground/60 ml-auto">
+        <span className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground font-semibold">Agent Summary</span>
+        <span className="text-[11px] text-muted-foreground/60 ml-auto">
           {activeSummaries.filter(s => s.status === "success").length}/{activeSummaries.length} done
         </span>
       </div>
@@ -536,8 +559,8 @@ const AgentInsightCards = ({ summaries }: { summaries: AgentSummary[] }) => {
                 )}
               >
                 <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", STATUS_DOT[agent.status] || STATUS_DOT.skipped)} />
-                <span className="text-[11px] font-semibold text-foreground shrink-0">{agent.agentName}</span>
-                <span className="text-[10px] text-muted-foreground truncate flex-1 mx-1">— {agent.headline}</span>
+                <span className="text-[12px] font-semibold text-foreground shrink-0">{agent.agentName}</span>
+                <span className="text-[11px] text-muted-foreground truncate flex-1 mx-1">— {agent.headline}</span>
                 {hasDetails && (
                   <ChevronDown className={cn(
                     "h-3 w-3 text-muted-foreground/40 shrink-0 transition-transform duration-200",
@@ -550,7 +573,7 @@ const AgentInsightCards = ({ summaries }: { summaries: AgentSummary[] }) => {
                   {agent.details.map((detail, i) => (
                     <div 
                       key={i} 
-                      className="text-[11px] text-muted-foreground leading-relaxed font-sans"
+                      className="text-[12px] text-muted-foreground leading-relaxed font-sans"
                       dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(detail) }}
                     />
                   ))}
@@ -660,7 +683,7 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
                   <thead className="bg-muted/50 text-muted-foreground">
                     <tr>
                       {message.rows[0] && Object.keys(message.rows[0] || {}).map((key) => (
-                        <th key={key} className="px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider border-b border-border">
+                        <th key={key} className="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wider border-b border-border">
                           {key}
                         </th>
                       ))}
@@ -670,7 +693,7 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
                     {message.rows.map((row, i) => (
                       <tr key={i} className="hover:bg-muted/30 transition-colors">
                         {row && Object.values(row).map((val, j) => (
-                          <td key={j} className="px-2.5 py-1 text-[12px] font-mono tabular-nums border-b border-border/50 whitespace-nowrap">
+                          <td key={j} className="px-2.5 py-1.5 text-[13px] font-mono tabular-nums border-b border-border/50 whitespace-nowrap">
                             {String(val ?? "")}
                           </td>
                         ))}
@@ -684,9 +707,40 @@ const MessageBlock = ({ message }: { message: QueryMessage }) => {
               <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-accent animate-blink rounded-sm" />
             )}
 
-            {/* Transparency Layer */}
+            {/* Trust & Evidence Layer */}
             {!isUser && !message.streaming && (
               <div className="mt-4 flex flex-wrap gap-2 items-center text-xs">
+                {/* Confidence badge */}
+                {typeof (message as any).confidence === "number" && (
+                  <Badge
+                    variant="secondary"
+                    className={cn(
+                      "px-2 py-0.5 text-[10px] uppercase font-semibold tracking-wider border",
+                      (message as any).confidence >= 0.8
+                        ? "bg-success/10 border-success/30 text-success"
+                        : (message as any).confidence >= 0.5
+                          ? "bg-warning/10 border-warning/30 text-warning"
+                          : "bg-destructive/10 border-destructive/30 text-destructive",
+                    )}
+                  >
+                    <ShieldCheck className="h-3 w-3 mr-1" />
+                    {Math.round((message as any).confidence * 100)}% confidence
+                  </Badge>
+                )}
+                {/* Row count provenance */}
+                {Array.isArray(message.rows) && message.rows.length > 0 && (
+                  <Badge variant="secondary" className="px-2 py-0.5 text-[10px] font-medium tracking-wider bg-surface/80 border-border/50 text-muted-foreground/80">
+                    <Table2 className="h-3 w-3 mr-1" />
+                    {message.rows.length} row{message.rows.length !== 1 ? "s" : ""} returned
+                  </Badge>
+                )}
+                {/* Cached indicator */}
+                {(message as any).cached && (
+                  <Badge variant="secondary" className="px-2 py-0.5 text-[10px] font-medium tracking-wider bg-accent/10 border-accent/20 text-accent">
+                    Cached
+                  </Badge>
+                )}
+                {/* Model name */}
                 {message.model && (
                   <Badge variant="secondary" className="px-2 py-0 text-[10px] uppercase font-medium tracking-wider bg-surface/80 border-border/50 text-muted-foreground/80">
                     <Sparkles className="h-3 w-3 mr-1" />

@@ -1,12 +1,3 @@
-"""Data-cleaning endpoints.
-
-Exposes the smart cleaning engine to the frontend:
-
-* ``POST /cleaning/suggest/{dataset_id}``  — type-aware recommendations
-* ``POST /cleaning/preview/{dataset_id}``  — dry-run a set of operations
-* ``POST /cleaning/apply/{dataset_id}``    — persist a cleaned copy
-"""
-
 from __future__ import annotations
 
 import io
@@ -42,20 +33,11 @@ class CleaningRequest(BaseModel):
 
 
 class ApplyRequest(CleaningRequest):
-    """``apply`` additionally lets the user set a name for the cleaned copy."""
-
     save_as: Optional[str] = None
 
 
 @cleaning_router.post("/suggest/{dataset_id}")
-async def cleaning_suggest(
-    dataset_id: str, cache: CacheService = Depends(get_cache)
-):
-    """Return type-aware cleaning suggestions for a dataset.
-
-    Works off the cached sample for speed — the suggestions apply equally to
-    the full dataset because the sample is representative.
-    """
+async def cleaning_suggest(dataset_id: str, cache: CacheService = Depends(get_cache)):
     df, schema = await _get_df_and_schema(dataset_id, cache)
     result = suggest_cleaning(df, schema.get("columns", []))
     result["dataset_id"] = dataset_id
@@ -78,14 +60,12 @@ async def cleaning_preview(
     body: CleaningRequest,
     cache: CacheService = Depends(get_cache),
 ):
-    """Dry-run the requested operations and report the diff without saving."""
     df, schema = await _get_df_and_schema(dataset_id, cache)
     original_rows = len(df)
     original_cols = list(df.columns)
 
     cleaned, report = apply_cleaning(df, [op.model_dump() for op in body.operations])
 
-    # Compute per-column null-pct delta so the UI can render a before/after bar.
     null_deltas = []
     before_null = df.isna().mean() * 100
     after_null = cleaned.isna().mean() * 100
@@ -125,11 +105,9 @@ async def cleaning_apply(
     cache: CacheService = Depends(get_cache),
     storage: StorageService = Depends(get_storage),
 ):
-    """Persist a cleaned copy of the dataset and register it as a new id."""
     df, schema = await _get_df_and_schema(dataset_id, cache)
     cleaned, report = apply_cleaning(df, [op.model_dump() for op in body.operations])
 
-    # Name the cleaned copy and persist as a fresh CSV.
     source_name = schema.get("name") or dataset_id
     base_name = body.save_as or f"{source_name} (cleaned)"
     filename = f"{base_name}.csv"
@@ -140,8 +118,6 @@ async def cleaning_apply(
     ref = await storage.store_file(payload, filename)
     new_id = ref["dataset_id"]
 
-    # Build schema + cached sample for the new dataset so the Query page can
-    # consume it immediately without waiting for the full ingestion pipeline.
     cols: List[Dict[str, Any]] = []
     for c in cleaned.columns:
         dtype = str(cleaned[c].dtype)
@@ -174,7 +150,6 @@ async def cleaning_apply(
     await cache.set_schema(new_id, new_schema)
     await cache.set_sample(new_id, sanitize_rows(cleaned.head(5000).to_dict("records")))
 
-    # Persist the dataset registry row so the new id survives restarts.
     try:
         from backend.services.sql_service import SQLWarehouse
 
@@ -191,7 +166,7 @@ async def cleaning_apply(
                 "created_at": datetime.utcnow(),
             }
         )
-    except Exception as exc:  # pragma: no cover - degrade gracefully
+    except Exception as exc:
         logger.warning("cleaned dataset registry insert failed", error=str(exc))
 
     return {

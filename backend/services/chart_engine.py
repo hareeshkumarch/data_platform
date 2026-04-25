@@ -1,33 +1,16 @@
 from __future__ import annotations
-import math
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from backend.models.schemas import ChartType, ValidationResult
+from backend.utils.data_utils import _safe, _safe_list
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 MAX_POINTS = 150
-
-
-def _safe(v: Any) -> Any:
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        return None if (np.isnan(v) or np.isinf(v)) else float(v)
-    if isinstance(v, float):
-        try:
-            return None if (math.isnan(v) or math.isinf(v)) else v
-        except Exception:
-            pass
-    return v
-
-
-def _clean(lst: list) -> list:
-    return [_safe(v) for v in lst]
 
 
 def _nums(cols: List[Dict]) -> List[str]:
@@ -429,7 +412,7 @@ class ChartDataBuilder:
         )
         return {
             "categories": g[x].astype(str).tolist(),
-            "series": [{"name": y, "data": _clean(g[y].tolist())}],
+            "series": [{"name": y, "data": _safe_list(g[y].tolist())}],
             "aggregation": "sum",
         }
 
@@ -449,7 +432,7 @@ class ChartDataBuilder:
             ts = ts.iloc[::step]
         return {
             "categories": ts[x].astype(str).tolist(),
-            "series": [{"name": y, "data": _clean(ts[y].tolist())}],
+            "series": [{"name": y, "data": _safe_list(ts[y].tolist())}],
         }
 
     def _d_area(self, df, c, s):
@@ -517,7 +500,10 @@ class ChartDataBuilder:
     def _d_heatmap(self, df, c, s):
         cols = [col for col in c.get("matrix", "").split(",") if col in df.columns]
         corr = df[cols].corr().round(3)
-        return {"columns": list(corr.columns), "matrix": _clean(corr.values.tolist())}
+        return {
+            "columns": list(corr.columns),
+            "matrix": _safe_list(corr.values.tolist()),
+        }
 
     def _d_histogram(self, df, c, s):
         col = c.get("value", "")
@@ -597,7 +583,7 @@ class ChartDataBuilder:
         sub = df[[x, y]].dropna().head(20)
         return {
             "categories": sub[x].astype(str).tolist(),
-            "series": [{"name": y, "data": _clean(sub[y].tolist())}],
+            "series": [{"name": y, "data": _safe_list(sub[y].tolist())}],
         }
 
     def _d_funnel(self, df, c, s):
@@ -721,25 +707,31 @@ class ChartConfigBuilder:
         drilldown: Dict = None,
         realtime: bool = False,
     ) -> Dict[str, Any]:
-        # Transform to frontend ChartSpec format natively
         xKey = "x"
         flat_data = []
         frontend_series = []
-        
+
         categories = data.get("categories", [])
         series = data.get("series", [])
-        
+
         if ct in ["pie", "donut"]:
             xKey = "name"
             if series and isinstance(series[0], dict) and "value" in series[0]:
-                flat_data = [{"name": str(s.get("name", "")), "value": s.get("value", 0)} for s in series]
+                flat_data = [
+                    {"name": str(s.get("name", "")), "value": s.get("value", 0)}
+                    for s in series
+                ]
             frontend_series = [{"key": "value", "label": "Value"}]
         elif ct in ["scatter", "bubble"]:
             xKey = "x"
             if series and isinstance(series[0], dict) and "data" in series[0]:
                 for p in series[0].get("data", []):
-                    flat_data.append({"x": p.get("x", 0), "y": p.get("y", 0), "z": p.get("z", 0)})
-            frontend_series = [{"key": "y", "label": series[0].get("name", "Y") if series else "Y"}]
+                    flat_data.append(
+                        {"x": p.get("x", 0), "y": p.get("y", 0), "z": p.get("z", 0)}
+                    )
+            frontend_series = [
+                {"key": "y", "label": series[0].get("name", "Y") if series else "Y"}
+            ]
             if ct == "bubble":
                 frontend_series.append({"key": "z", "label": "Size"})
         elif ct == "heatmap":
@@ -754,7 +746,6 @@ class ChartConfigBuilder:
                 flat_data.append(obj)
             frontend_series = [{"key": c, "label": c} for c in cols]
         else:
-            # Standard Line/Bar/Area/etc
             xKey = "x"
             data_len = max([len(categories)] + [len(s.get("data", [])) for s in series])
             for i in range(data_len):
@@ -763,7 +754,15 @@ class ChartConfigBuilder:
                     key = str(s.get("name", f"series_{idx}")).replace(" ", "_").lower()
                     row[key] = s.get("data", [])[i] if i < len(s.get("data", [])) else 0
                 flat_data.append(row)
-            frontend_series = [{"key": str(s.get("name", f"series_{idx}")).replace(" ", "_").lower(), "label": s.get("name", f"Series {idx}")} for idx, s in enumerate(series)]
+            frontend_series = [
+                {
+                    "key": str(s.get("name", f"series_{idx}"))
+                    .replace(" ", "_")
+                    .lower(),
+                    "label": s.get("name", f"Series {idx}"),
+                }
+                for idx, s in enumerate(series)
+            ]
 
         return {
             "chart": ct,
@@ -782,7 +781,7 @@ class ChartConfigBuilder:
             },
             "meta": {
                 "series_count": len(series),
-                "point_count": sum(len(s.get("data", [])) for s in series)
+                "point_count": sum(len(s.get("data", [])) for s in series),
             },
         }
 

@@ -1,11 +1,3 @@
-"""LLM service backed by direct provider credentials.
-
-Supports OpenAI, Anthropic and Gemini providers. ``complete`` returns a
-full response; ``stream_complete`` yields incremental chunks. We fan-out the
-single completion into word-sized chunks to keep the frontend streaming
-smoothly even when the underlying SDK does not expose a native stream.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import litellm
 
@@ -31,8 +23,6 @@ _CIRCUIT_BREAKER = CircuitBreaker(
     cooldown_seconds=30.0,
 )
 
-
-# Model catalogue surfaced to the Settings page
 ALL_MODELS: Dict[str, List[Dict[str, Any]]] = {
     "openai": [
         {"id": "gpt-5.2", "label": "GPT-5.2", "mode": "advanced"},
@@ -76,7 +66,6 @@ ALL_MODELS: Dict[str, List[Dict[str, Any]]] = {
     ],
 }
 
-
 DEFAULT_MODEL_BY_PROVIDER: Dict[str, str] = {
     "openai": "gpt-5.2",
     "anthropic": "claude-sonnet-4-5-20250929",
@@ -87,8 +76,6 @@ DEFAULT_MODEL_BY_PROVIDER: Dict[str, str] = {
 
 @dataclass
 class LLMStats:
-    """Simple in-process counters used by the Settings page."""
-
     calls: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -108,15 +95,10 @@ class LLMStats:
 
 _GLOBAL_LLM_STATS = LLMStats()
 
-
-# Cap the response body we run through the slow JSON-salvage parser so a
-# misbehaving or adversarial provider can't pin a CPU with O(n²) scans.
-_MAX_JSON_CANDIDATE_BYTES = 64 * 1024
+MAX_PARSE_SCAN_BYTES = 50000
 
 
 def _coerce_provider(provider: Any) -> LLMProvider:
-    """Map a provider string to an LLMProvider enum without silently falling
-    through to GEMINI (which previously polluted metrics with wrong labels)."""
     if isinstance(provider, LLMProvider):
         return provider
     if isinstance(provider, str):
@@ -127,7 +109,6 @@ def _coerce_provider(provider: Any) -> LLMProvider:
             if member.value == key or member.name.lower() == key:
                 return member
     logger.warning("Unknown LLM provider value", provider=str(provider))
-    # Fall back to the configured default rather than a hard-coded vendor.
     default = settings.DEFAULT_LLM_PROVIDER.lower()
     if default in LLMProvider._value2member_map_:
         return LLMProvider(default)
@@ -135,8 +116,6 @@ def _coerce_provider(provider: Any) -> LLMProvider:
 
 
 class LLMService:
-    """Thin wrapper around litellm supporting multiple providers."""
-
     def __init__(self, cache=None) -> None:
         self._cache = cache
         self._sem = asyncio.Semaphore(settings.LLM_PARALLEL_CALLS)
@@ -152,14 +131,7 @@ class LLMService:
                 "No LLM keys configured — set at least one provider API key."
             )
 
-    # ---- public API --------------------------------------------------------
-
     async def complete(self, request: LLMRequest) -> LLMResponse:
-        """Return a full completion, using cache when available.
-
-        Integrates circuit-breaker resilience: if the preferred provider is
-        tripped, auto-fallback to the next healthy configured provider.
-        """
         key = self._cache_key(request) if request.use_cache else None
         if key and self._cache:
             raw = await self._cache.get_json(key)
@@ -187,7 +159,6 @@ class LLMService:
                     provider, providers, self._direct_keys
                 )
                 if fallback == provider:
-                    # All breakers open; try anyway (degraded)
                     pass
                 else:
                     logger.warning(
@@ -215,11 +186,9 @@ class LLMService:
                 metrics.llm_tokens.labels(provider=provider, model=model).inc(
                     tokens_in + tokens_out
                 )
-                metrics.llm_latency.labels(provider=provider).observe(
-                    latency_ms / 1000
-                )
+                metrics.llm_latency.labels(provider=provider).observe(latency_ms / 1000)
                 await _CIRCUIT_BREAKER.record_success(provider)
-                break  # success — exit retry loop
+                break
             except Exception as exc:
                 latency_ms = (time.perf_counter() - start) * 1000
                 self._stats.observe(0, 0, latency_ms, error=True)
@@ -234,13 +203,11 @@ class LLMService:
                 )
                 await _CIRCUIT_BREAKER.record_failure(provider)
                 last_exc = exc
-                # Try next provider on next iteration
                 provider = _CIRCUIT_BREAKER.pick_fallback(
                     provider, providers, self._direct_keys
                 )
                 model = self._default_model_for(provider)
         else:
-            # All providers exhausted
             raise last_exc or RuntimeError("All LLM providers failed.")
 
         response = LLMResponse(
@@ -271,10 +238,6 @@ class LLMService:
         return response
 
     async def stream_complete(self, request: LLMRequest) -> AsyncIterator[str]:
-        """Stream tokens directly from the LLM provider as they arrive.
-
-        Uses ``litellm.acompletion(stream=True, stream_options={"include_usage": True})``.
-        """
         provider, model = self._resolve(request)
         direct_key = self._direct_keys.get(provider)
         if not direct_key:
@@ -305,26 +268,8 @@ class LLMService:
         start = time.perf_counter()
         full_text = ""
         tokens_in, tokens_out = 0, 0
-        
-        # Exponential backoff for stream initialization
-        max_retries = 3
-        base_delay = 1.5
-        stream = None
-        
-        for attempt in range(max_retries):
-            try:
-                stream = await litellm.acompletion(**params)
-                break
-            except Exception as e:
-                err_str = str(e).lower()
-                is_transient = any(code in err_str for code in ["429", "500", "502", "503", "504", "rate limit", "timeout"])
-                
-                if is_transient and attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(f"LLM Stream Transient Error (Attempt {attempt + 1}/{max_retries}) Provider: {provider}. Retrying in {delay}s... Error: {e}")
-                    await asyncio.sleep(delay)
-                else:
-                    raise
+
+        stream = await self._retry_call(params, provider)
 
         try:
             async for chunk in stream:
@@ -399,8 +344,6 @@ class LLMService:
     def _default_model_for(provider: str) -> str:
         return DEFAULT_MODEL_BY_PROVIDER.get(provider, settings.DEFAULT_LLM_MODEL)
 
-    # ---- internals ---------------------------------------------------------
-
     def _resolve(self, request: LLMRequest) -> tuple[str, str]:
         provider = (
             request.provider.value
@@ -438,21 +381,34 @@ class LLMService:
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
-        
-        # Exponential backoff for resilience against rate limits (429) and server errors (50x)
+
+        return await self._retry_call(params, provider)
+
+    async def _retry_call(self, params: Dict[str, Any], provider: str) -> Any:
         max_retries = 3
         base_delay = 1.5
-        
         for attempt in range(max_retries):
             try:
                 return await litellm.acompletion(**params)
             except Exception as e:
                 err_str = str(e).lower()
-                is_transient = any(code in err_str for code in ["429", "500", "502", "503", "504", "rate limit", "timeout"])
-                
+                is_transient = any(
+                    code in err_str
+                    for code in [
+                        "429",
+                        "500",
+                        "502",
+                        "503",
+                        "504",
+                        "rate limit",
+                        "timeout",
+                    ]
+                )
                 if is_transient and attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(f"LLM Transient Error (Attempt {attempt + 1}/{max_retries}) Provider: {provider}. Retrying in {delay}s... Error: {e}")
+                    delay = base_delay * (2**attempt)
+                    logger.warning(
+                        f"LLM Transient Error (Attempt {attempt + 1}/{max_retries}) Provider: {provider}. Retrying in {delay}s... Error: {e}"
+                    )
                     await asyncio.sleep(delay)
                 else:
                     raise
@@ -464,32 +420,15 @@ class LLMService:
 
     @staticmethod
     def extract_json(text: str) -> Any:
-        """Robust JSON extraction from a possibly fenced or mixed LLM response."""
         text = (text or "").strip()
-        # Cap input to prevent O(n²) scan on adversarially large responses.
-        if len(text) > _MAX_JSON_CANDIDATE_BYTES:
-            text = text[:_MAX_JSON_CANDIDATE_BYTES]
-
-        # 1. Try to find a JSON-specific code block first
-        json_fence = re.search(r"```(?:json)\s*([\s\S]+?)\s*```", text, re.IGNORECASE)
-        if json_fence:
+        text = text[:MAX_PARSE_SCAN_BYTES]
+        match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text, re.IGNORECASE)
+        if match:
             try:
-                return json.loads(json_fence.group(1).strip())
+                return json.loads(match.group(1).strip())
             except json.JSONDecodeError:
                 pass
 
-        # 2. Try any code block, but check if it's actually JSON
-        any_fence = re.finditer(r"```(?:\w+)?\s*([\s\S]+?)\s*```", text)
-        for match in any_fence:
-            content = match.group(1).strip()
-            if content.startswith(("{", "[")):
-                try:
-                    return json.loads(content)
-                except json.JSONDecodeError:
-                    continue
-
-        # 3. Aggressive scan: find ALL "{" or "[" and try to parse from each one
-        # We search from the largest possible candidate blocks first
         candidates = []
         for i, char in enumerate(text):
             if char in ("{", "["):
@@ -497,36 +436,26 @@ class LLMService:
                 last_end = text.rfind(end_char, i)
                 if last_end != -1:
                     candidates.append((i, last_end))
-
-        # Sort candidates: we prefer ones that are closer to the end (often where the final JSON is)
-        # or ones that are larger.
         candidates.sort(key=lambda x: x[0], reverse=True)
-
         for start, end in candidates:
             candidate = text[start : end + 1]
             try:
                 return json.loads(candidate)
             except json.JSONDecodeError:
-                # Try cleaning it
                 cleaned = re.sub(r"//.*$", "", candidate, flags=re.MULTILINE)
                 cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
                 try:
                     return json.loads(cleaned)
                 except json.JSONDecodeError:
                     continue
-
-        raise ValueError(
-            "No valid JSON object could be extracted from the LLM response."
-        )
+        raise ValueError("No valid JSON object could be extracted.")
 
     @staticmethod
     def extract_json_with_preamble(text: str) -> tuple[Any, str]:
-        """Returns (parsed_data, preamble_text) from a response."""
         text = (text or "").strip()
-        if len(text) > _MAX_JSON_CANDIDATE_BYTES:
-            text = text[:_MAX_JSON_CANDIDATE_BYTES]
+        if len(text) > MAX_PARSE_SCAN_BYTES:
+            text = text[:MAX_PARSE_SCAN_BYTES]
 
-        # 1. Try strict JSON block first
         json_fence = re.search(r"```(?:json)\s*([\s\S]+?)\s*```", text, re.IGNORECASE)
         if json_fence:
             try:
@@ -536,41 +465,6 @@ class LLMService:
             except json.JSONDecodeError:
                 pass
 
-        # 2. Try generic blocks that start with { or [
-        any_fence = re.finditer(r"```(?:\w+)?\s*([\s\S]+?)\s*```", text)
-        for match in any_fence:
-            content = match.group(1).strip()
-            if content.startswith(("{", "[")):
-                try:
-                    data = json.loads(content)
-                    preamble = text[: match.start()].strip()
-                    return data, preamble
-                except json.JSONDecodeError:
-                    pass
-
-        # 3. Fallback: Aggressive scan for highest-weighted dictionary candidate
-        candidates = []
-        for i, char in enumerate(text):
-            if char in ("{", "["):
-                end_char = "}" if char == "{" else "]"
-                last_end = text.rfind(end_char, i)
-                if last_end != -1:
-                    candidates.append((i, last_end))
-
-        # Sort candidates by length to prefer the largest encompassing JSON bounds
-        candidates.sort(key=lambda x: x[1] - x[0], reverse=True)
-
-        for start, end in candidates:
-            candidate = text[start : end + 1]
-            try:
-                data = json.loads(candidate)
-                preamble = text[:start].strip()
-                preamble = re.sub(r"```[a-z]*", "", preamble).strip()
-                return data, preamble
-            except Exception:
-                continue
-
-        # Last resort fallback if everything failed
         try:
             return LLMService.extract_json(text), ""
         except ValueError:

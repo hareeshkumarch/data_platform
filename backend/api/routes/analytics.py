@@ -85,7 +85,9 @@ async def advanced_metrics(
                 "median": round(float(s.median()), 4),
                 "std": round(std_val, 4),
                 "variance": round(float(s.var()), 4),
-                "cv_pct": round(abs(std_val / mean_val) * 100, 2) if mean_val != 0 else 0,
+                "cv_pct": round(abs(std_val / mean_val) * 100, 2)
+                if mean_val != 0
+                else 0,
                 "iqr": round(iqr, 4),
                 "iqr_ratio": round(iqr / (abs(mean_val) + 1e-10), 4),
                 "range": round(float(s.max() - s.min()), 4),
@@ -189,7 +191,9 @@ async def correlations(
             ).get("correlations", [])[:20],
         }
 
-    return await _cached_response(cache, f"analytics:correlations:{dataset_id}", _compute)
+    return await _cached_response(
+        cache, f"analytics:correlations:{dataset_id}", _compute
+    )
 
 
 @analytics_router.get("/{dataset_id}/outliers")
@@ -217,9 +221,15 @@ async def trends(
         df = await _load_dataframe(dataset_id, storage)
         date_cols = df.select_dtypes(include="datetime").columns.tolist()
         if not date_cols:
-            raise HTTPException(400, "No datetime column available for trend detection.")
+            raise HTTPException(
+                400, "No datetime column available for trend detection."
+            )
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-        value_col = column if column and column in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+        value_col = (
+            column
+            if column and column in numeric_cols
+            else (numeric_cols[0] if numeric_cols else None)
+        )
         if not value_col:
             raise HTTPException(400, "No numeric column available for trends.")
         return AdvancedAnalytics.detect_trends(df, date_cols[0], value_col)
@@ -239,7 +249,9 @@ async def distributions(
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         return AdvancedAnalytics.distribution_analysis(df, numeric_cols)
 
-    return await _cached_response(cache, f"analytics:distributions:{dataset_id}", _compute)
+    return await _cached_response(
+        cache, f"analytics:distributions:{dataset_id}", _compute
+    )
 
 
 @analytics_router.get("/{dataset_id}/quality")
@@ -267,7 +279,9 @@ async def relationships(
         df = await _load_dataframe(dataset_id, storage)
         return AdvancedAnalytics.column_relationships(df)
 
-    return await _cached_response(cache, f"analytics:relationships:{dataset_id}", _compute)
+    return await _cached_response(
+        cache, f"analytics:relationships:{dataset_id}", _compute
+    )
 
 
 @analytics_router.get("/{dataset_id}/decomposition")
@@ -281,12 +295,18 @@ async def decomposition(
     async def _compute() -> Dict[str, Any]:
         df = await _load_dataframe(dataset_id, storage)
         date_cols = [
-            c for c in df.columns if any(token in c.lower() for token in ("date", "ts", "time"))
+            c
+            for c in df.columns
+            if any(token in c.lower() for token in ("date", "ts", "time"))
         ]
         if not date_cols:
             raise HTTPException(400, "No date/time column found in dataset.")
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-        value_col = column if column and column in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+        value_col = (
+            column
+            if column and column in numeric_cols
+            else (numeric_cols[0] if numeric_cols else None)
+        )
         if not value_col:
             raise HTTPException(400, "No numeric column available for decomposition.")
         return AdvancedAnalytics.ts_decomposition(df, date_cols[0], value_col, period)
@@ -339,31 +359,88 @@ async def forecast(
     storage: StorageService = Depends(_storage),
     cache: CacheService = Depends(_cache),
 ) -> Dict[str, Any]:
+    if periods < 1 or periods > 120:
+        raise HTTPException(422, "'periods' must be between 1 and 120.")
+
     async def _compute() -> Dict[str, Any]:
         df = await _load_dataframe(dataset_id, storage)
         if column not in df.columns:
             raise HTTPException(400, f"Unknown column: {column}")
         date_cols = [
-            c for c in df.columns if any(token in c.lower() for token in ("date", "ts", "time"))
+            c
+            for c in df.columns
+            if any(token in c.lower() for token in ("date", "ts", "time"))
         ]
         if not date_cols:
-            raise HTTPException(400, "Forecasting requires a date/time column in the dataset.")
+            raise HTTPException(
+                400, "Forecasting requires a date/time column in the dataset."
+            )
         ts = df[[date_cols[0], column]].copy()
         ts[date_cols[0]] = pd.to_datetime(ts[date_cols[0]], errors="coerce")
         ts = ts.dropna().sort_values(date_cols[0])
         if len(ts) < 5:
-            raise HTTPException(400, "Not enough data points for a forecast.")
-        grouped = ts.groupby(pd.Grouper(key=date_cols[0], freq="M"))[column].mean().dropna()
+            raise HTTPException(
+                400, "Not enough data points for a forecast (minimum 5 required)."
+            )
+        grouped = (
+            ts.groupby(pd.Grouper(key=date_cols[0], freq="M"))[column].mean().dropna()
+        )
         if len(grouped) < 3:
-            raise HTTPException(400, "Not enough monthly aggregates for a forecast.")
+            raise HTTPException(
+                400,
+                "Not enough monthly aggregates for a forecast (minimum 3 required).",
+            )
         x = np.arange(len(grouped))
         y = grouped.values
         slope, intercept = np.polyfit(x, y, 1)
         future_x = np.arange(len(grouped), len(grouped) + periods)
         future = (slope * future_x + intercept).tolist()
+
+        residuals = y - (slope * x + intercept)
+        residual_std = float(np.std(residuals)) if len(residuals) > 1 else 0.0
+        ci_upper = [(slope * fx + intercept + 1.96 * residual_std) for fx in future_x]
+        ci_lower = [(slope * fx + intercept - 1.96 * residual_std) for fx in future_x]
+        r_squared = (
+            1.0 - (np.sum(residuals**2) / np.sum((y - np.mean(y)) ** 2))
+            if np.sum((y - np.mean(y)) ** 2) > 0
+            else 0.0
+        )
+
+        confidence_level = (
+            "high" if r_squared > 0.7 else "medium" if r_squared > 0.4 else "low"
+        )
+        warnings = []
+        if len(grouped) < 12:
+            warnings.append(
+                "Limited data: fewer than 12 monthly observations reduce forecast reliability."
+            )
+        if residual_std > abs(np.mean(y)) * 0.5:
+            warnings.append(
+                "High variance: residual noise exceeds 50% of the mean, treat with caution."
+            )
+
         return {
             "history": grouped.round(4).to_dict(),
             "forecast": [round(float(val), 4) for val in future],
+            "confidence": {
+                "level": confidence_level,
+                "r_squared": round(float(r_squared), 4),
+                "residual_std": round(residual_std, 4),
+                "ci_upper_95": [round(float(v), 4) for v in ci_upper],
+                "ci_lower_95": [round(float(v), 4) for v in ci_lower],
+            },
+            "method": {
+                "name": "linear_regression",
+                "description": "Simple linear trend extrapolation on monthly-aggregated values.",
+                "assumptions": [
+                    "Assumes a linear trend continuation.",
+                    "Monthly aggregation smooths sub-monthly variation.",
+                    "No seasonality or external variable adjustments.",
+                ],
+                "min_data_points": 5,
+                "data_points_used": int(len(grouped)),
+            },
+            "warnings": warnings,
         }
 
     cache_key = f"analytics:forecast:{dataset_id}:{column}:{periods}"
@@ -378,12 +455,24 @@ async def anomalies(
     storage: StorageService = Depends(_storage),
     cache: CacheService = Depends(_cache),
 ) -> Dict[str, Any]:
+    if threshold < 1.0 or threshold > 10.0:
+        raise HTTPException(422, "'threshold' must be between 1.0 and 10.0.")
+
     async def _compute() -> Dict[str, Any]:
         df = await _load_dataframe(dataset_id, storage)
         if column not in df.columns or not pd.api.types.is_numeric_dtype(df[column]):
-            raise HTTPException(400, f"Column '{column}' is not numeric.")
+            raise HTTPException(
+                400, f"Column '{column}' is not numeric or does not exist."
+            )
         s = df[column].dropna()
-        z = (s - s.mean()) / (s.std(ddof=0) or 1.0)
+        if len(s) < 10:
+            raise HTTPException(
+                400,
+                f"Column '{column}' has fewer than 10 non-null values; anomaly detection requires at least 10.",
+            )
+        mean_val = float(s.mean())
+        std_val = float(s.std(ddof=0)) or 1.0
+        z = (s - mean_val) / std_val
         hits = z.abs() > threshold
         anomalies = []
         for idx, score in zip(s[hits].index, z[hits].values):
@@ -395,12 +484,35 @@ async def anomalies(
                     "z_score": round(float(score), 3),
                 }
             )
+        rate_pct = round(float(hits.mean() * 100), 2) if len(s) else 0.0
         return {
             "column": column,
             "count": int(hits.sum()),
-            "rate_pct": round(float(hits.mean() * 100), 2) if len(s) else 0.0,
+            "rate_pct": rate_pct,
             "threshold": threshold,
             "anomalies": anomalies[:100],
+            "confidence": {
+                "level": "high"
+                if len(s) >= 100
+                else "medium"
+                if len(s) >= 30
+                else "low",
+                "sample_size": int(len(s)),
+            },
+            "method": {
+                "name": "z_score",
+                "description": "Points whose absolute z-score exceeds the threshold are flagged.",
+                "assumptions": [
+                    "Assumes approximately normal distribution.",
+                    "Sensitive to extreme skew or heavy tails.",
+                    "Not suitable for multimodal distributions.",
+                ],
+                "min_data_points": 10,
+            },
+            "stats": {
+                "mean": round(mean_val, 4),
+                "std": round(std_val, 4),
+            },
         }
 
     cache_key = f"analytics:anomalies:{dataset_id}:{column}:{threshold}"
@@ -423,8 +535,9 @@ async def segmentation(
         df = await _load_dataframe(dataset_id, storage)
         if body.segment_col not in df.columns:
             raise HTTPException(400, f"Unknown column: {body.segment_col}")
-        return AdvancedAnalytics.segment_analysis(df, body.segment_col, body.metric_cols)
+        return AdvancedAnalytics.segment_analysis(
+            df, body.segment_col, body.metric_cols
+        )
 
     cache_key = f"analytics:segments:{dataset_id}:{body.segment_col}:{','.join(sorted(body.metric_cols))}"
     return await _cached_response(cache, cache_key, _compute)
-*** End Patch

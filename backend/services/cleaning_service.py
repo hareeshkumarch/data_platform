@@ -1,10 +1,3 @@
-"""Rule-based data cleaning engine.
-
-Operations are applied sequentially against a pandas DataFrame and return a
-mutation report so the UI can show what changed. Each op is a self-contained
-function so new rules are easy to add.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -15,11 +8,24 @@ import re
 import numpy as np
 import pandas as pd
 
+from backend.utils.data_utils import (
+    EMAIL_RE as _EMAIL_PATTERN,
+    URL_RE as _URL_PATTERN,
+    PHONE_RE as _PHONE_PATTERN,
+    CURRENCY_STRIP_RE as _CURRENCY_STRIP,
+    HTML_TAGS_RE as _HTML_TAGS,
+    MULTI_SPACE_RE as _MULTI_SPACE,
+    cleaning_fill_missing,
+    cleaning_trim_strings,
+    cleaning_standardize_case,
+    cleaning_normalize_whitespace,
+    cleaning_coerce_types,
+    cleaning_clip_values,
+)
+
 
 @dataclass
 class CleaningOp:
-    """A single cleaning instruction."""
-
     op: str
     columns: Optional[List[str]] = None
     params: Dict[str, Any] = field(default_factory=dict)
@@ -36,7 +42,6 @@ class CleaningReport:
 def clean_dataframe(
     df: pd.DataFrame, operations: List[CleaningOp]
 ) -> tuple[pd.DataFrame, CleaningReport]:
-    """Apply a list of cleaning operations and return the new DataFrame + report."""
     rows_before = len(df)
     df = df.copy()
     total_modified = 0
@@ -53,7 +58,6 @@ def clean_dataframe(
         "drop_columns": _drop_columns,
         "rename_columns": _rename_columns,
         "clip_values": _clip_values,
-        # ── Semantic / advanced ops ──
         "regex_replace": _regex_replace,
         "validate_emails": _validate_emails,
         "validate_urls": _validate_urls,
@@ -104,11 +108,6 @@ def clean_dataframe(
     )
 
 
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
-
-
 def _drop_duplicates(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
     before = len(df)
     cleaned = df.drop_duplicates(subset=op.columns or None, keep="first")
@@ -122,40 +121,14 @@ def _drop_nulls(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
 
 
 def _fill_missing(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    strategy = op.params.get("strategy", "mean")
     cols = op.columns or df.columns.tolist()
     modified = 0
     for col in cols:
         if col not in df.columns:
             continue
-        null_mask = df[col].isna()
-        if not null_mask.any():
-            continue
-        if strategy == "mean" and pd.api.types.is_numeric_dtype(df[col]):
-            value = df[col].mean()
-        elif strategy == "median" and pd.api.types.is_numeric_dtype(df[col]):
-            value = df[col].median()
-        elif strategy == "mode":
-            value = df[col].mode().iloc[0] if not df[col].mode().empty else None
-        elif strategy == "zero":
-            value = 0
-        elif strategy == "constant":
-            value = op.params.get("value")
-        elif strategy == "forward":
-            before = df[col].isna().sum()
-            df[col] = df[col].ffill()
-            modified += before - df[col].isna().sum()
-            continue
-        elif strategy == "backward":
-            before = df[col].isna().sum()
-            df[col] = df[col].bfill()
-            modified += before - df[col].isna().sum()
-            continue
-        else:
-            value = None
-        if value is not None:
-            df.loc[null_mask, col] = value
-            modified += int(null_mask.sum())
+        modified += cleaning_fill_missing(
+            df, col, op.params.get("strategy", "mean"), op.params.get("value")
+        )
     return df, modified
 
 
@@ -165,52 +138,26 @@ def _trim_strings(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
     for col in cols:
         if col not in df.columns:
             continue
-        original = df[col].astype(str)
-        trimmed = original.str.strip()
-        modified += int((original != trimmed).sum())
-        df[col] = trimmed.where(df[col].notna(), None)
+        modified += cleaning_trim_strings(df, col)
     return df, modified
 
 
 def _standardize_case(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    mode = op.params.get("mode", "lower")
     cols = [c for c in (op.columns or df.select_dtypes(include="object").columns)]
     modified = 0
     for col in cols:
         if col not in df.columns:
             continue
-        s = df[col].astype(str)
-        if mode == "lower":
-            new = s.str.lower()
-        elif mode == "upper":
-            new = s.str.upper()
-        elif mode == "title":
-            new = s.str.title()
-        else:
-            continue
-        modified += int((s != new).sum())
-        df[col] = new.where(df[col].notna(), None)
+        modified += cleaning_standardize_case(df, col, op.params.get("mode", "lower"))
     return df, modified
 
 
 def _coerce_types(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    target = op.params.get("dtype", "numeric")
     modified = 0
     for col in op.columns or []:
         if col not in df.columns:
             continue
-        if target == "numeric":
-            new = pd.to_numeric(df[col], errors="coerce")
-        elif target == "datetime":
-            new = pd.to_datetime(df[col], errors="coerce")
-        elif target == "string":
-            new = df[col].astype(str)
-        elif target == "boolean":
-            new = df[col].astype(str).str.lower().isin(["true", "1", "yes", "y"])
-        else:
-            continue
-        modified += int((df[col].astype(str) != new.astype(str)).sum())
-        df[col] = new
+        modified += cleaning_coerce_types(df, col, op.params.get("dtype", "numeric"))
     return df, modified
 
 
@@ -248,29 +195,14 @@ def _rename_columns(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int
 
 
 def _clip_values(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    lo = op.params.get("min")
-    hi = op.params.get("max")
     modified = 0
     for col in op.columns or df.select_dtypes(include=np.number).columns:
         if col not in df.columns:
             continue
-        original = df[col]
-        clipped = original.clip(lower=lo, upper=hi)
-        modified += int((original != clipped).sum())
-        df[col] = clipped
+        modified += cleaning_clip_values(
+            df, col, op.params.get("min"), op.params.get("max")
+        )
     return df, modified
-
-
-# ---------------------------------------------------------------------------
-# Semantic / Advanced Handlers
-# ---------------------------------------------------------------------------
-
-_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_URL_PATTERN = re.compile(r"^(https?://|www\.)[^\s]+$", re.IGNORECASE)
-_PHONE_PATTERN = re.compile(r"^[\s\d+\-().]{7,20}$")
-_CURRENCY_STRIP = re.compile(r"[^\d.\-]")
-_HTML_TAGS = re.compile(r"<[^>]+>")
-_MULTI_SPACE = re.compile(r"\s{2,}")
 
 
 def _regex_replace(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
@@ -291,14 +223,19 @@ def _regex_replace(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]
 
 
 def _validate_emails(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    action = op.params.get("action", "flag")  # "flag" | "nullify" | "drop"
-    cols = op.columns or [c for c in df.select_dtypes("object").columns
-                          if "email" in c.lower() or "mail" in c.lower()]
+    action = op.params.get("action", "flag")
+    cols = op.columns or [
+        c
+        for c in df.select_dtypes("object").columns
+        if "email" in c.lower() or "mail" in c.lower()
+    ]
     modified = 0
     for col in cols:
         if col not in df.columns:
             continue
-        mask = df[col].notna() & ~df[col].astype(str).str.strip().str.match(_EMAIL_PATTERN)
+        mask = df[col].notna() & ~df[col].astype(str).str.strip().str.match(
+            _EMAIL_PATTERN
+        )
         count = int(mask.sum())
         if count == 0:
             continue
@@ -312,13 +249,18 @@ def _validate_emails(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, in
 
 def _validate_urls(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
     action = op.params.get("action", "nullify")
-    cols = op.columns or [c for c in df.select_dtypes("object").columns
-                          if "url" in c.lower() or "link" in c.lower() or "website" in c.lower()]
+    cols = op.columns or [
+        c
+        for c in df.select_dtypes("object").columns
+        if "url" in c.lower() or "link" in c.lower() or "website" in c.lower()
+    ]
     modified = 0
     for col in cols:
         if col not in df.columns:
             continue
-        mask = df[col].notna() & ~df[col].astype(str).str.strip().str.match(_URL_PATTERN)
+        mask = df[col].notna() & ~df[col].astype(str).str.strip().str.match(
+            _URL_PATTERN
+        )
         count = int(mask.sum())
         if count == 0:
             continue
@@ -332,8 +274,11 @@ def _validate_urls(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]
 
 def _validate_phones(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
     action = op.params.get("action", "nullify")
-    cols = op.columns or [c for c in df.select_dtypes("object").columns
-                          if "phone" in c.lower() or "tel" in c.lower() or "mobile" in c.lower()]
+    cols = op.columns or [
+        c
+        for c in df.select_dtypes("object").columns
+        if "phone" in c.lower() or "tel" in c.lower() or "mobile" in c.lower()
+    ]
     modified = 0
     for col in cols:
         if col not in df.columns:
@@ -346,7 +291,9 @@ def _validate_phones(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, in
         if action == "nullify":
             df.loc[mask, col] = None
         elif action == "normalize":
-            df[col] = stripped.str.replace(r"[^\d+]", "", regex=True).where(df[col].notna(), None)
+            df[col] = stripped.str.replace(r"[^\d+]", "", regex=True).where(
+                df[col].notna(), None
+            )
             modified += int(df[col].notna().sum())
             continue
         modified += count
@@ -354,8 +301,14 @@ def _validate_phones(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, in
 
 
 def _normalize_currency(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    cols = op.columns or [c for c in df.columns
-                          if any(k in c.lower() for k in ("price", "cost", "amount", "revenue", "salary", "fee"))]
+    cols = op.columns or [
+        c
+        for c in df.columns
+        if any(
+            k in c.lower()
+            for k in ("price", "cost", "amount", "revenue", "salary", "fee")
+        )
+    ]
     modified = 0
     for col in cols:
         if col not in df.columns:
@@ -363,7 +316,9 @@ def _normalize_currency(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame,
         if pd.api.types.is_numeric_dtype(df[col]):
             continue
         original = df[col].astype(str)
-        cleaned = original.apply(lambda x: _CURRENCY_STRIP.sub("", x) if x != "nan" else x)
+        cleaned = original.apply(
+            lambda x: _CURRENCY_STRIP.sub("", x) if x != "nan" else x
+        )
         numeric = pd.to_numeric(cleaned, errors="coerce")
         changed = int((df[col].astype(str) != numeric.astype(str)).sum())
         df[col] = numeric
@@ -373,8 +328,11 @@ def _normalize_currency(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame,
 
 def _standardize_dates(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
     fmt = op.params.get("format", "%Y-%m-%d")
-    cols = op.columns or [c for c in df.columns
-                          if "date" in c.lower() or "time" in c.lower() or "ts" in c.lower()]
+    cols = op.columns or [
+        c
+        for c in df.columns
+        if "date" in c.lower() or "time" in c.lower() or "ts" in c.lower()
+    ]
     modified = 0
     for col in cols:
         if col not in df.columns:
@@ -419,21 +377,24 @@ def _normalized_edit_similarity(a: str, b: str) -> float:
     max_len = max(len(a), len(b))
     if max_len == 0:
         return 1.0
-    # Simple Levenshtein via DP (bounded for performance)
     if abs(len(a) - len(b)) > max_len * 0.3:
         return 0.0
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a):
         curr = [i + 1]
         for j, cb in enumerate(b):
-            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if ca == cb else 1)))
+            curr.append(
+                min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if ca == cb else 1))
+            )
         prev = curr
     return 1.0 - prev[-1] / max_len
 
 
 def _encode_categoricals(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    method = op.params.get("method", "label")  # "label" | "onehot"
-    cols = op.columns or df.select_dtypes(include=["object", "category"]).columns.tolist()
+    method = op.params.get("method", "label")
+    cols = (
+        op.columns or df.select_dtypes(include=["object", "category"]).columns.tolist()
+    )
     modified = 0
     for col in cols:
         if col not in df.columns:
@@ -481,10 +442,9 @@ def _normalize_whitespace(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFram
     for col in cols:
         if col not in df.columns:
             continue
-        original = df[col].astype(str)
-        cleaned = original.str.strip().str.replace(_MULTI_SPACE, " ", regex=True)
-        modified += int((original != cleaned).sum())
-        df[col] = cleaned.where(df[col].notna(), None)
+        modified += cleaning_normalize_whitespace(
+            df, col, op.params.get("lowercase", True)
+        )
     return df, modified
 
 
@@ -511,7 +471,9 @@ def _bin_numeric(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
         if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
             continue
         if labels and len(labels) == bins:
-            df[col] = pd.cut(df[col], bins=bins, labels=labels, include_lowest=True).astype(str)
+            df[col] = pd.cut(
+                df[col], bins=bins, labels=labels, include_lowest=True
+            ).astype(str)
         else:
             df[col] = pd.cut(df[col], bins=bins, include_lowest=True).astype(str)
         modified += len(df)
@@ -519,7 +481,7 @@ def _bin_numeric(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
 
 
 def _log_transform(df: pd.DataFrame, op: CleaningOp) -> tuple[pd.DataFrame, int]:
-    base = op.params.get("base", "natural")  # "natural" | "log2" | "log10"
+    base = op.params.get("base", "natural")
     cols = op.columns or df.select_dtypes(include=np.number).columns.tolist()
     modified = 0
     for col in cols:

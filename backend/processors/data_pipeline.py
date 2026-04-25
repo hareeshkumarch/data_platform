@@ -10,9 +10,6 @@ from backend.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# ── Base Processor ────────────────────────────────────────────────────────────
-
-
 class BaseProcessor(ABC):
     name: str = "base"
 
@@ -29,9 +26,6 @@ class BaseProcessor(ABC):
         except Exception as e:
             logger.error(f"{self.name} processor failed", error=str(e))
             return df
-
-
-# ── Processors ────────────────────────────────────────────────────────────────
 
 
 class DropHighNullProcessor(BaseProcessor):
@@ -211,8 +205,6 @@ class SampleProcessor(BaseProcessor):
             return df.sample(frac=frac, random_state=seed).reset_index(drop=True)
         return df
 
-
-# ── Pipeline Runner ───────────────────────────────────────────────────────────
 
 PROCESSOR_REGISTRY: Dict[str, BaseProcessor] = {
     "drop_high_null": DropHighNullProcessor(),

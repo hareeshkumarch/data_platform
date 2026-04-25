@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import io
+import re
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -8,6 +9,61 @@ import pandas as pd
 from scipy import stats
 
 from backend.config import settings
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+URL_RE = re.compile(r"^(https?://|www\.)[^\s]+$", re.IGNORECASE)
+PHONE_RE = re.compile(r"^[\s\d+\-().]{7,}$")
+CURRENCY_RE = re.compile(r"^[\s$€£¥₹]*-?\d[\d,.\s]*[%]?$")
+CURRENCY_STRIP_RE = re.compile(r"[^\d.\-]")
+HTML_TAGS_RE = re.compile(r"<[^>]+>")
+MULTI_SPACE_RE = re.compile(r"\s{2,}")
+
+
+def _corr_strength(r: float) -> str:
+    a = abs(r)
+    if a >= 0.8:
+        return "very_strong"
+    if a >= 0.6:
+        return "strong"
+    if a >= 0.4:
+        return "moderate"
+    if a >= 0.2:
+        return "weak"
+    return "negligible"
+
+
+def _entropy(vc: pd.Series) -> float:
+    probs = vc / vc.sum()
+    return float(-(probs * np.log2(probs + 1e-10)).sum())
+
+
+def _mape(actual: np.ndarray, predicted: np.ndarray) -> float:
+    try:
+        mask = actual != 0
+        if not mask.any():
+            return 0.0
+        return float(
+            np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100
+        )
+    except Exception:
+        return 0.0
+
+
+def _growth_rate(df: pd.DataFrame, date_col: str, value_col: str) -> Optional[float]:
+    try:
+        ts = df[[date_col, value_col]].copy()
+        ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
+        ts = ts.dropna().sort_values(date_col)
+        if len(ts) < 2:
+            return None
+        mid = len(ts) // 2
+        first_half = ts.iloc[:mid][value_col].sum()
+        second_half = ts.iloc[mid:][value_col].sum()
+        if first_half == 0:
+            return None
+        return round((second_half - first_half) / abs(first_half) * 100, 2)
+    except Exception:
+        return None
 
 
 def parse_csv(content: bytes) -> pd.DataFrame:
@@ -138,6 +194,30 @@ def smart_sample(df: pd.DataFrame) -> pd.DataFrame:
     return df.sample(n=settings.SAMPLE_SIZE, random_state=42).reset_index(drop=True)
 
 
+def compute_distribution(s: pd.Series) -> Dict[str, Any]:
+    s = s.dropna()
+    if s.empty:
+        return {}
+    try:
+        sk, ku = float(stats.skew(s)), float(stats.kurtosis(s))
+    except Exception:
+        sk, ku = 0.0, 0.0
+    counts, edges = np.histogram(s, bins=min(20, s.nunique()))
+    return {
+        "skewness": round(sk, 4),
+        "kurtosis": round(ku, 4),
+        "histogram": {
+            "counts": counts.tolist(),
+            "edges": [round(e, 4) for e in edges.tolist()],
+        },
+        "p5": float(s.quantile(0.05)),
+        "p25": float(s.quantile(0.25)),
+        "p50": float(s.quantile(0.50)),
+        "p75": float(s.quantile(0.75)),
+        "p95": float(s.quantile(0.95)),
+    }
+
+
 def compute_summary_stats(df: pd.DataFrame) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     num = df.select_dtypes("number")
@@ -193,10 +273,10 @@ def time_series_decompose(
     residual = ts - trend - seasonal
     return {
         "dates": ts.index.astype(str).tolist(),
-        "observed": _to_list(ts),
-        "trend": _to_list(trend),
-        "seasonal": _to_list(seasonal),
-        "residual": _to_list(residual),
+        "observed": _safe_list(ts),
+        "trend": _safe_list(trend),
+        "seasonal": _safe_list(seasonal),
+        "residual": _safe_list(residual),
     }
 
 
@@ -208,21 +288,19 @@ def compute_moving_averages(
     ts = ts.dropna().sort_values(time_col).set_index(time_col)
     result: Dict[str, Any] = {
         "dates": ts.index.astype(str).tolist(),
-        "raw": _to_list(ts[value_col]),
+        "raw": _safe_list(ts[value_col]),
     }
     for w in [7, 14, 30]:
         if len(ts) >= w:
-            result[f"sma_{w}"] = _to_list(ts[value_col].rolling(w).mean())
-            result[f"ewma_{w}"] = _to_list(ts[value_col].ewm(span=w).mean())
+            result[f"sma_{w}"] = _safe_list(ts[value_col].rolling(w).mean())
+            result[f"ewma_{w}"] = _safe_list(ts[value_col].ewm(span=w).mean())
     return result
 
 
 def naive_forecast(series: pd.Series, steps: int = 14) -> Dict[str, Any]:
-    """An upgraded forecasting logic using moving average trend instead of flat naive repetition."""
     if len(series) < 5:
         return {"method": "none", "predictions": []}
 
-    # Calculate a simple trend over the last 7 periods
     recent_trend = series.tail(7).diff().mean()
     if pd.isna(recent_trend):
         recent_trend = 0
@@ -234,24 +312,22 @@ def naive_forecast(series: pd.Series, steps: int = 14) -> Dict[str, Any]:
 
     forecast = []
     for i in range(1, steps + 1):
-        # Project the trend forward
         predicted_val = last_val + (recent_trend * i)
-
-        # Cone of uncertainty expands by 0.6 standard deviations per step
         bound = std_dev * (1 + 0.6 * i)
-
-        forecast.append({
-            "step": i,
-            "prediction": _safe(predicted_val),
-            "lower_bound": _safe(max(0, predicted_val - bound)),
-            "upper_bound": _safe(predicted_val + bound)
-        })
+        forecast.append(
+            {
+                "step": i,
+                "prediction": _safe(predicted_val),
+                "lower_bound": _safe(max(0, predicted_val - bound)),
+                "upper_bound": _safe(predicted_val + bound),
+            }
+        )
 
     return {
         "method": "trend_projected",
         "steps": steps,
         "predictions": forecast,
-        "confidence_level": 0.85
+        "confidence_level": 0.85,
     }
 
 
@@ -280,10 +356,8 @@ def sanitize_rows(records: list) -> list:
 
 
 def _sanitize_value(v: Any) -> Any:
-    """Convert a single value to a JSON-safe primitive."""
     if v is None:
         return None
-    # numpy scalars
     if isinstance(v, (np.integer,)):
         return int(v)
     if isinstance(v, (np.floating,)):
@@ -292,30 +366,23 @@ def _sanitize_value(v: Any) -> Any:
         return bool(v)
     if isinstance(v, (np.ndarray,)):
         return [_sanitize_value(x) for x in v.tolist()]
-    # numpy datetime / timedelta
     if isinstance(v, (np.datetime64, np.timedelta64)):
         return str(v)
-    # numpy dtype descriptors (e.g. DateTime64DType) — not data, just type info
     if isinstance(v, np.dtype):
         return str(v)
-    if hasattr(np, 'dtypes') and isinstance(v, type) and issubclass(type(v), type):
+    if hasattr(np, "dtypes") and isinstance(v, type) and issubclass(type(v), type):
         return str(v)
-    # pandas Timestamp / Timedelta / NaT
     if isinstance(v, pd.Timestamp):
         return v.isoformat() if not pd.isna(v) else None
     if isinstance(v, pd.Timedelta):
         return str(v)
-    # Catch-all for any remaining numpy dtype descriptor objects
-    # These are objects like numpy.dtypes.DateTime64DType that lack __dict__
     type_name = type(v).__module__
-    if type_name.startswith('numpy.dtypes') or type_name.startswith('numpy'):
+    if type_name.startswith("numpy.dtypes") or type_name.startswith("numpy"):
         try:
-            # Last-resort: if it's some exotic numpy object, stringify it
             if not isinstance(v, (int, float, str, bool, list, dict)):
                 return str(v)
         except Exception:
             return str(v)
-    # pandas NA check
     try:
         if pd.isna(v):
             return None
@@ -336,11 +403,25 @@ def _safe(v: Any) -> Any:
         return int(v)
     if isinstance(v, (np.floating,)):
         return float(v)
+    if isinstance(v, float):
+        import math
+
+        try:
+            if math.isnan(v) or math.isinf(v):
+                return None
+        except Exception:
+            pass
     return v
 
 
+def _safe_list(series_or_list) -> List[Any]:
+    if isinstance(series_or_list, pd.Series):
+        return [_safe(v) for v in series_or_list.tolist()]
+    return [_safe(v) for v in series_or_list]
+
+
 def _to_list(series: pd.Series) -> List[Any]:
-    return [_safe(v) for v in series.tolist()]
+    return _safe_list(series)
 
 
 def _convert(obj: Any) -> Any:
@@ -356,19 +437,139 @@ def _convert(obj: Any) -> Any:
         return _convert(obj.tolist())
     if isinstance(obj, np.bool_):
         return bool(obj)
-    # numpy datetime / timedelta
     if isinstance(obj, (np.datetime64, np.timedelta64)):
         return str(obj)
-    # numpy dtype descriptors (DateTime64DType, etc.)
     if isinstance(obj, np.dtype):
         return str(obj)
-    # pandas types
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat() if not pd.isna(obj) else None
     if isinstance(obj, pd.Timedelta):
         return str(obj)
-    # Catch exotic numpy descriptor objects that lack __dict__
-    type_mod = getattr(type(obj), '__module__', '')
-    if type_mod.startswith('numpy') and not isinstance(obj, (int, float, str, bool)):
+    type_mod = getattr(type(obj), "__module__", "")
+    if type_mod.startswith("numpy") and not isinstance(obj, (int, float, str, bool)):
         return str(obj)
     return obj
+
+
+_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{4,}$")
+_BOOL_LIKE = {"true", "false", "yes", "no", "y", "n", "0", "1", "t", "f"}
+
+
+def get_semantic_type(series: pd.Series, inferred: str) -> str:
+    if inferred in ("numeric", "datetime", "boolean"):
+        return inferred
+    sample = series.dropna().astype(str).head(200)
+    if sample.empty:
+        return "categorical"
+    lowered = sample.str.strip().str.lower()
+    non_empty = lowered[lowered != ""]
+    if len(non_empty) == 0:
+        return "categorical"
+    if non_empty.isin(_BOOL_LIKE).mean() > 0.9:
+        return "boolean"
+    patterns = {
+        "email": EMAIL_RE,
+        "url": URL_RE,
+        "phone": PHONE_RE,
+        "currency": CURRENCY_RE,
+    }
+    for label, regex in patterns.items():
+        if non_empty.str.match(regex).mean() > 0.8:
+            return label
+    ratio = series.nunique(dropna=True) / max(len(series), 1)
+    if ratio > 0.9 and sample.str.match(_ID_RE).mean() > 0.9:
+        return "identifier"
+    if series.nunique(dropna=True) <= max(50, int(len(series) * 0.05)):
+        return "categorical"
+    return "text"
+
+
+def cleaning_fill_missing(
+    df: pd.DataFrame, column: str, strategy: str, value: Any = None
+) -> int:
+    s = df[column]
+    null_mask = s.isna()
+    if not null_mask.any():
+        return 0
+    if strategy == "forward":
+        df[column] = s.ffill()
+    elif strategy == "backward":
+        df[column] = s.bfill()
+    elif strategy == "constant":
+        df.loc[null_mask, column] = value
+    elif strategy == "zero":
+        df.loc[null_mask, column] = 0
+    else:
+        if strategy == "median" and pd.api.types.is_numeric_dtype(s):
+            val = s.median()
+        elif strategy == "mean" and pd.api.types.is_numeric_dtype(s):
+            val = s.mean()
+        elif strategy == "mode":
+            mode_vals = s.mode(dropna=True)
+            val = mode_vals.iloc[0] if not mode_vals.empty else None
+        else:
+            val = None
+        if val is not None:
+            df.loc[null_mask, column] = val
+    return int(null_mask.sum())
+
+
+def cleaning_trim_strings(df: pd.DataFrame, column: str) -> int:
+    s = df[column].astype(str)
+    trimmed = s.str.strip()
+    modified = int((s != trimmed).sum())
+    df[column] = trimmed.where(df[column].notna(), None)
+    return modified
+
+
+def cleaning_standardize_case(
+    df: pd.DataFrame, column: str, mode: str = "lower"
+) -> int:
+    s = df[column].astype(str)
+    if mode == "upper":
+        new = s.str.upper()
+    elif mode == "title":
+        new = s.str.title()
+    else:
+        new = s.str.lower()
+    modified = int((s != new).sum())
+    df[column] = new.where(df[column].notna(), None)
+    return modified
+
+
+def cleaning_normalize_whitespace(
+    df: pd.DataFrame, column: str, lowercase: bool = True
+) -> int:
+    s = df[column].astype(str)
+    new = s.str.strip().str.replace(r"\s+", " ", regex=True)
+    if lowercase:
+        new = new.str.lower()
+    modified = int((s != new).sum())
+    df[column] = new.where(df[column].notna(), None)
+    return modified
+
+
+def cleaning_coerce_types(df: pd.DataFrame, column: str, dtype: str = "numeric") -> int:
+    s = df[column]
+    if dtype == "numeric":
+        new = pd.to_numeric(s, errors="coerce")
+    elif dtype == "datetime":
+        new = pd.to_datetime(s, errors="coerce")
+    elif dtype == "boolean":
+        truthy = {"true", "1", "yes", "y", "t"}
+        new = s.astype(str).str.strip().str.lower().isin(truthy)
+        new = new.where(s.notna(), None)
+    else:
+        new = s.astype(str)
+    modified = int((s.astype(str) != new.astype(str)).sum())
+    df[column] = new
+    return modified
+
+
+def cleaning_clip_values(
+    df: pd.DataFrame, column: str, min_val: Any = None, max_val: Any = None
+) -> int:
+    s = df[column]
+    before = s.copy()
+    df[column] = s.clip(lower=min_val, upper=max_val)
+    return int((before != df[column]).sum())

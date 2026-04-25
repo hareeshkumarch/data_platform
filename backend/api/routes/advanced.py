@@ -1,10 +1,3 @@
-"""Advanced routes: extra demo datasets, cleaning pipeline, advanced analytics
-and post-ingestion stats.
-
-Kept as a separate module so the legacy endpoint file stays focused on the
-original surface area while new capabilities land here with clean typing.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -48,11 +41,6 @@ async def _load_df(dataset_id: str, storage: StorageService) -> pd.DataFrame:
         raise HTTPException(404, "Dataset file not found on disk.")
     except ValueError as exc:
         raise HTTPException(415, str(exc))
-
-
-# ---------------------------------------------------------------------------
-# Demo catalogue
-# ---------------------------------------------------------------------------
 
 
 @advanced_router.get("/datasets/demo-catalogue")
@@ -101,18 +89,12 @@ async def seed_demo_kind(
     }
 
 
-# ---------------------------------------------------------------------------
-# Post-ingestion stats
-# ---------------------------------------------------------------------------
-
-
 @advanced_router.get("/datasets/{dataset_id}/stats")
 async def dataset_stats(
     dataset_id: str,
     storage: StorageService = Depends(_storage),
     cache: CacheService = Depends(_cache),
 ) -> Dict[str, Any]:
-    """Return a consolidated stat-pack used by the ingestion summary cards."""
     schema = await cache.get_schema(dataset_id)
     df = await _load_df(dataset_id, storage)
 
@@ -124,7 +106,6 @@ async def dataset_stats(
         100 * (1 - (missing_cells / total_cells) if total_cells else 0), 1
     )
 
-    # Top categorical distribution for the highlight card
     top_category: Dict[str, Any] = {}
     if text_cols:
         col = text_cols[0]
@@ -134,7 +115,6 @@ async def dataset_stats(
             "values": [{"label": str(k), "count": int(v)} for k, v in vc.items()],
         }
 
-    # Numeric leaderboard
     numeric_summary: List[Dict[str, Any]] = []
     for col in numeric_cols[:6]:
         s = df[col].dropna()
@@ -166,11 +146,6 @@ async def dataset_stats(
         "numeric_summary": numeric_summary,
         "sample_rows": df.head(5).to_dict(orient="records"),
     }
-
-
-# ---------------------------------------------------------------------------
-# Data cleaning
-# ---------------------------------------------------------------------------
 
 
 class CleaningStep(BaseModel):
@@ -253,11 +228,9 @@ async def cleaning_suggestions(
     dataset_id: str,
     storage: StorageService = Depends(_storage),
 ) -> Dict[str, Any]:
-    """Heuristic recommendations the UI renders as one-click chips."""
     df = await _load_df(dataset_id, storage)
     suggestions: List[Dict[str, Any]] = []
 
-    # Nulls
     null_pct = df.isna().mean() * 100
     for col, pct in null_pct.sort_values(ascending=False).head(5).items():
         if pct <= 0:
@@ -289,7 +262,6 @@ async def cleaning_suggestions(
                 }
             )
 
-    # Duplicates
     dup_rows = int(df.duplicated().sum())
     if dup_rows > 0:
         suggestions.append(
@@ -300,7 +272,6 @@ async def cleaning_suggestions(
             }
         )
 
-    # String trimming
     text_cols = df.select_dtypes(include="object").columns.tolist()
     if text_cols:
         suggestions.append(
@@ -311,7 +282,6 @@ async def cleaning_suggestions(
             }
         )
 
-    # Outliers – reuse advanced analytics summary for consistency with analytics API
     numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
     outlier_summary = AdvancedAnalytics.outlier_summary(df, numeric_cols)
     for entry in outlier_summary[:3]:
@@ -331,18 +301,12 @@ async def cleaning_suggestions(
     return {"suggestions": suggestions[:8]}
 
 
-# ---------------------------------------------------------------------------
-# PowerBI Integration
-# ---------------------------------------------------------------------------
-
-
 @advanced_router.get("/powerbi/{dataset_id}/dax-measures")
 async def powerbi_dax_measures(
     dataset_id: str,
     storage: StorageService = Depends(_storage),
     cache: CacheService = Depends(_cache),
 ) -> Dict[str, Any]:
-    """Generate DAX measure definitions for Power BI based on column types."""
     df = await _load_df(dataset_id, storage)
     schema = await cache.get_schema(dataset_id)
     schema_cols = schema.get("columns", []) if schema else []
@@ -357,31 +321,98 @@ async def powerbi_dax_measures(
 
     for col in numeric_cols[:10]:
         safe_col = col.replace(" ", "_")
-        measures.extend([
-            {"name": f"Total_{safe_col}", "expression": f"SUM('{tbl}'[{col}])", "type": "aggregate", "column": col},
-            {"name": f"Avg_{safe_col}", "expression": f"AVERAGE('{tbl}'[{col}])", "type": "aggregate", "column": col},
-            {"name": f"Max_{safe_col}", "expression": f"MAX('{tbl}'[{col}])", "type": "aggregate", "column": col},
-            {"name": f"Min_{safe_col}", "expression": f"MIN('{tbl}'[{col}])", "type": "aggregate", "column": col},
-            {"name": f"Count_{safe_col}", "expression": f"COUNTROWS(FILTER('{tbl}', NOT(ISBLANK('{tbl}'[{col}]))))", "type": "count", "column": col},
-        ])
+        measures.extend(
+            [
+                {
+                    "name": f"Total_{safe_col}",
+                    "expression": f"SUM('{tbl}'[{col}])",
+                    "type": "aggregate",
+                    "column": col,
+                },
+                {
+                    "name": f"Avg_{safe_col}",
+                    "expression": f"AVERAGE('{tbl}'[{col}])",
+                    "type": "aggregate",
+                    "column": col,
+                },
+                {
+                    "name": f"Max_{safe_col}",
+                    "expression": f"MAX('{tbl}'[{col}])",
+                    "type": "aggregate",
+                    "column": col,
+                },
+                {
+                    "name": f"Min_{safe_col}",
+                    "expression": f"MIN('{tbl}'[{col}])",
+                    "type": "aggregate",
+                    "column": col,
+                },
+                {
+                    "name": f"Count_{safe_col}",
+                    "expression": f"COUNTROWS(FILTER('{tbl}', NOT(ISBLANK('{tbl}'[{col}]))))",
+                    "type": "count",
+                    "column": col,
+                },
+            ]
+        )
         if date_cols:
             dc = date_cols[0]
-            measures.extend([
-                {"name": f"YTD_{safe_col}", "expression": f"TOTALYTD(SUM('{tbl}'[{col}]), '{tbl}'[{dc}])", "type": "time_intelligence", "column": col},
-                {"name": f"MTD_{safe_col}", "expression": f"TOTALMTD(SUM('{tbl}'[{col}]), '{tbl}'[{dc}])", "type": "time_intelligence", "column": col},
-                {"name": f"PrevMonth_{safe_col}", "expression": f"CALCULATE(SUM('{tbl}'[{col}]), DATEADD('{tbl}'[{dc}], -1, MONTH))", "type": "time_intelligence", "column": col},
-                {"name": f"MoM_Growth_{safe_col}", "expression": f"VAR _current = SUM('{tbl}'[{col}]) VAR _prev = CALCULATE(SUM('{tbl}'[{col}]), DATEADD('{tbl}'[{dc}], -1, MONTH)) RETURN DIVIDE(_current - _prev, _prev, 0)", "type": "time_intelligence", "column": col},
-            ])
+            measures.extend(
+                [
+                    {
+                        "name": f"YTD_{safe_col}",
+                        "expression": f"TOTALYTD(SUM('{tbl}'[{col}]), '{tbl}'[{dc}])",
+                        "type": "time_intelligence",
+                        "column": col,
+                    },
+                    {
+                        "name": f"MTD_{safe_col}",
+                        "expression": f"TOTALMTD(SUM('{tbl}'[{col}]), '{tbl}'[{dc}])",
+                        "type": "time_intelligence",
+                        "column": col,
+                    },
+                    {
+                        "name": f"PrevMonth_{safe_col}",
+                        "expression": f"CALCULATE(SUM('{tbl}'[{col}]), DATEADD('{tbl}'[{dc}], -1, MONTH))",
+                        "type": "time_intelligence",
+                        "column": col,
+                    },
+                    {
+                        "name": f"MoM_Growth_{safe_col}",
+                        "expression": f"VAR _current = SUM('{tbl}'[{col}]) VAR _prev = CALCULATE(SUM('{tbl}'[{col}]), DATEADD('{tbl}'[{dc}], -1, MONTH)) RETURN DIVIDE(_current - _prev, _prev, 0)",
+                        "type": "time_intelligence",
+                        "column": col,
+                    },
+                ]
+            )
 
     for col in cat_cols[:5]:
         safe_col = col.replace(" ", "_")
-        measures.append({"name": f"DistinctCount_{safe_col}", "expression": f"DISTINCTCOUNT('{tbl}'[{col}])", "type": "categorical", "column": col})
+        measures.append(
+            {
+                "name": f"DistinctCount_{safe_col}",
+                "expression": f"DISTINCTCOUNT('{tbl}'[{col}])",
+                "type": "categorical",
+                "column": col,
+            }
+        )
 
-    # Quality measures
-    measures.extend([
-        {"name": "Total_Rows", "expression": f"COUNTROWS('{tbl}')", "type": "metadata", "column": "_table_"},
-        {"name": "Data_Completeness", "expression": f"DIVIDE(COUNTROWS('{tbl}') - COUNTBLANK('{tbl}'[{numeric_cols[0] if numeric_cols else cat_cols[0] if cat_cols else 'ID'}]), COUNTROWS('{tbl}'), 0)", "type": "quality", "column": "_table_"},
-    ])
+    measures.extend(
+        [
+            {
+                "name": "Total_Rows",
+                "expression": f"COUNTROWS('{tbl}')",
+                "type": "metadata",
+                "column": "_table_",
+            },
+            {
+                "name": "Data_Completeness",
+                "expression": f"DIVIDE(COUNTROWS('{tbl}') - COUNTBLANK('{tbl}'[{numeric_cols[0] if numeric_cols else cat_cols[0] if cat_cols else 'ID'}]), COUNTROWS('{tbl}'), 0)",
+                "type": "quality",
+                "column": "_table_",
+            },
+        ]
+    )
 
     return {
         "dataset_id": dataset_id,
@@ -398,7 +429,6 @@ async def powerbi_m_query(
     storage: StorageService = Depends(_storage),
     cache: CacheService = Depends(_cache),
 ) -> Dict[str, Any]:
-    """Generate Power Query M code to connect and transform the dataset."""
     df = await _load_df(dataset_id, storage)
     schema = await cache.get_schema(dataset_id)
     name = schema.get("name", dataset_id) if schema else dataset_id
@@ -408,15 +438,15 @@ async def powerbi_m_query(
     for col in cols:
         if pd.api.types.is_numeric_dtype(df[col]):
             if pd.api.types.is_integer_dtype(df[col]):
-                type_map.append(f'{{"{ col }", Int64.Type}}')
+                type_map.append(f'{{"{col}", Int64.Type}}')
             else:
-                type_map.append(f'{{"{ col }", type number}}')
+                type_map.append(f'{{"{col}", type number}}')
         elif pd.api.types.is_datetime64_any_dtype(df[col]):
-            type_map.append(f'{{"{ col }", type datetime}}')
+            type_map.append(f'{{"{col}", type datetime}}')
         elif pd.api.types.is_bool_dtype(df[col]):
-            type_map.append(f'{{"{ col }", type logical}}')
+            type_map.append(f'{{"{col}", type logical}}')
         else:
-            type_map.append(f'{{"{ col }", type text}}')
+            type_map.append(f'{{"{col}", type text}}')
 
     m_code = f"""let
     Source = Csv.Document(File.Contents("{name}.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.None]),
@@ -442,7 +472,6 @@ async def powerbi_data_model(
     storage: StorageService = Depends(_storage),
     cache: CacheService = Depends(_cache),
 ) -> Dict[str, Any]:
-    """Generate a data model definition for Power BI with relationships and hierarchies."""
     df = await _load_df(dataset_id, storage)
     schema = await cache.get_schema(dataset_id)
     schema_cols = schema.get("columns", []) if schema else []
@@ -470,27 +499,34 @@ async def powerbi_data_model(
             cat_cols.append(col)
         columns_def.append(col_def)
 
-    # Auto-detect date hierarchies
     for dc in date_cols:
-        hierarchies.append({
-            "name": f"{dc}_Hierarchy",
-            "levels": [
-                {"name": "Year", "expression": f"YEAR([{dc}])"},
-                {"name": "Quarter", "expression": f"\"Q\" & FORMAT([{dc}], \"Q\")"},
-                {"name": "Month", "expression": f"FORMAT([{dc}], \"MMMM\")"},
-                {"name": "Day", "expression": f"DAY([{dc}])"},
-            ],
-        })
+        hierarchies.append(
+            {
+                "name": f"{dc}_Hierarchy",
+                "levels": [
+                    {"name": "Year", "expression": f"YEAR([{dc}])"},
+                    {"name": "Quarter", "expression": f'"Q" & FORMAT([{dc}], "Q")'},
+                    {"name": "Month", "expression": f'FORMAT([{dc}], "MMMM")'},
+                    {"name": "Day", "expression": f"DAY([{dc}])"},
+                ],
+            }
+        )
 
-    # Auto-detect potential relationships
     relationships = AdvancedAnalytics.column_relationships(df).get("relationships", [])
 
     return {
         "dataset_id": dataset_id,
-        "tables": [{"name": schema.get("name", dataset_id) if schema else dataset_id, "columns": columns_def}],
+        "tables": [
+            {
+                "name": schema.get("name", dataset_id) if schema else dataset_id,
+                "columns": columns_def,
+            }
+        ],
         "hierarchies": hierarchies,
         "relationships": relationships[:10],
-        "suggested_visuals": _suggest_powerbi_visuals(numeric_cols, cat_cols, date_cols),
+        "suggested_visuals": _suggest_powerbi_visuals(
+            numeric_cols, cat_cols, date_cols
+        ),
     }
 
 
@@ -499,31 +535,88 @@ def _suggest_powerbi_visuals(
 ) -> List[Dict[str, Any]]:
     visuals = []
     if dates and numeric:
-        visuals.append({"type": "lineChart", "title": f"Trend: {numeric[0]} over time", "x": dates[0], "y": numeric[0], "description": "Time-series line chart"})
+        visuals.append(
+            {
+                "type": "lineChart",
+                "title": f"Trend: {numeric[0]} over time",
+                "x": dates[0],
+                "y": numeric[0],
+                "description": "Time-series line chart",
+            }
+        )
     if categorical and numeric:
-        visuals.append({"type": "barChart", "title": f"{numeric[0]} by {categorical[0]}", "x": categorical[0], "y": numeric[0], "description": "Categorical comparison"})
+        visuals.append(
+            {
+                "type": "barChart",
+                "title": f"{numeric[0]} by {categorical[0]}",
+                "x": categorical[0],
+                "y": numeric[0],
+                "description": "Categorical comparison",
+            }
+        )
     if len(numeric) >= 2:
-        visuals.append({"type": "scatterPlot", "title": f"{numeric[0]} vs {numeric[1]}", "x": numeric[0], "y": numeric[1], "description": "Numeric correlation scatter"})
+        visuals.append(
+            {
+                "type": "scatterPlot",
+                "title": f"{numeric[0]} vs {numeric[1]}",
+                "x": numeric[0],
+                "y": numeric[1],
+                "description": "Numeric correlation scatter",
+            }
+        )
     if categorical:
-        visuals.append({"type": "pieChart", "title": f"Distribution of {categorical[0]}", "category": categorical[0], "description": "Category proportions"})
+        visuals.append(
+            {
+                "type": "pieChart",
+                "title": f"Distribution of {categorical[0]}",
+                "category": categorical[0],
+                "description": "Category proportions",
+            }
+        )
     if numeric:
-        visuals.append({"type": "kpiCard", "title": f"KPI: {numeric[0]}", "metric": numeric[0], "description": "Summary KPI card"})
-        visuals.append({"type": "gauge", "title": f"Gauge: {numeric[0]}", "metric": numeric[0], "description": "Goal-tracking gauge"})
+        visuals.append(
+            {
+                "type": "kpiCard",
+                "title": f"KPI: {numeric[0]}",
+                "metric": numeric[0],
+                "description": "Summary KPI card",
+            }
+        )
+        visuals.append(
+            {
+                "type": "gauge",
+                "title": f"Gauge: {numeric[0]}",
+                "metric": numeric[0],
+                "description": "Goal-tracking gauge",
+            }
+        )
     if dates and numeric and len(numeric) >= 2:
-        visuals.append({"type": "comboChart", "title": f"{numeric[0]} & {numeric[1]} Timeline", "x": dates[0], "y1": numeric[0], "y2": numeric[1], "description": "Dual-axis combo chart"})
+        visuals.append(
+            {
+                "type": "comboChart",
+                "title": f"{numeric[0]} & {numeric[1]} Timeline",
+                "x": dates[0],
+                "y1": numeric[0],
+                "y2": numeric[1],
+                "description": "Dual-axis combo chart",
+            }
+        )
     if len(categorical) >= 2 and numeric:
-        visuals.append({"type": "matrix", "title": f"{categorical[0]} × {categorical[1]}", "rows": categorical[0], "cols": categorical[1], "values": numeric[0], "description": "Cross-tabulation matrix"})
+        visuals.append(
+            {
+                "type": "matrix",
+                "title": f"{categorical[0]} × {categorical[1]}",
+                "rows": categorical[0],
+                "cols": categorical[1],
+                "values": numeric[0],
+                "description": "Cross-tabulation matrix",
+            }
+        )
     return visuals
-
-
-# ---------------------------------------------------------------------------
-# System stats
-# ---------------------------------------------------------------------------
 
 
 @advanced_router.get("/system/stats")
 async def system_stats() -> Dict[str, Any]:
-    """Real-time system metrics for the dashboard."""
     from backend.utils.logger import metrics
     import time
 
@@ -531,21 +624,17 @@ async def system_stats() -> Dict[str, Any]:
         "llm_calls": int(getattr(metrics, "_llm_call_count", 0)),
         "llm_tokens": int(getattr(metrics, "_llm_token_count", 0)),
         "success_rate": round(getattr(metrics, "_success_rate", 99.5), 1),
-        "uptime_seconds": int(time.time() - getattr(metrics, "_start_time", time.time())),
+        "uptime_seconds": int(
+            time.time() - getattr(metrics, "_start_time", time.time())
+        ),
         "active_datasets": 0,
         "cache_hit_rate": round(getattr(metrics, "_cache_hit_rate", 85.0), 1),
         "avg_response_ms": round(getattr(metrics, "_avg_response_ms", 120.0), 1),
     }
 
 
-# ---------------------------------------------------------------------------
-# SSE pipeline streaming (HTTP fallback for WebSocket)
-# ---------------------------------------------------------------------------
-
-
 @advanced_router.post("/pipeline/{dataset_id}/stream")
 async def pipeline_stream_sse(dataset_id: str, request: Request):
-    """Server-Sent Events fallback for pipeline progress streaming."""
     import json
     import time as _time
     import uuid as _uuid
@@ -559,14 +648,19 @@ async def pipeline_stream_sse(dataset_id: str, request: Request):
     async def event_generator():
         from backend.agents.orchestrator.orchestrator_agent import OrchestratorAgent
 
-        # Reuse existing singletons where available (mirrors websocket.py pattern)
         from backend.api.routes.websocket import _get_shared_services
+
         cache, llm, vector, storage = _get_shared_services()
         orchestrator = OrchestratorAgent(cache, llm, vector, storage)
 
         stage_ids = [
-            "ingestion", "understanding", "feature",
-            "insight", "visualization", "report", "evaluator",
+            "ingestion",
+            "understanding",
+            "feature",
+            "insight",
+            "visualization",
+            "report",
+            "evaluator",
         ]
         started = _time.perf_counter()
         event_queue: asyncio.Queue = asyncio.Queue()
@@ -577,22 +671,23 @@ async def pipeline_stream_sse(dataset_id: str, request: Request):
             elapsed = round((_time.perf_counter() - started) * 1000, 1)
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(event_queue.put({
-                    "type": "progress",
-                    "stage": stage_ids[idx],
-                    "progress_pct": round(pct, 1),
-                    "elapsed_ms": elapsed,
-                }))
+                loop.create_task(
+                    event_queue.put(
+                        {
+                            "type": "progress",
+                            "stage": stage_ids[idx],
+                            "progress_pct": round(pct, 1),
+                            "elapsed_ms": elapsed,
+                        }
+                    )
+                )
             except RuntimeError:
-                # No running loop — silently drop the event
                 pass
 
         orchestrator.progress_cb = progress_cb
 
-        # Send initial event
         yield f"data: {json.dumps({'type': 'start', 'stages': stage_ids})}\n\n"
 
-        # Run pipeline in background task, drain queue for SSE events
         async def run_pipeline():
             try:
                 result = await orchestrator.execute(
@@ -616,11 +711,18 @@ async def pipeline_stream_sse(dataset_id: str, request: Request):
                 else:
                     reply = f"Pipeline error: {result.error or 'Unknown'}"
 
-                await event_queue.put({"type": "complete", "reply": reply, "elapsed_ms": elapsed, "dataset_id": dataset_id})
+                await event_queue.put(
+                    {
+                        "type": "complete",
+                        "reply": reply,
+                        "elapsed_ms": elapsed,
+                        "dataset_id": dataset_id,
+                    }
+                )
             except Exception as exc:
                 await event_queue.put({"type": "error", "message": str(exc)})
             finally:
-                await event_queue.put(None)  # sentinel
+                await event_queue.put(None)
 
         task = asyncio.create_task(run_pipeline())
 
@@ -631,7 +733,7 @@ async def pipeline_stream_sse(dataset_id: str, request: Request):
             yield f"data: {json.dumps(event)}\n\n"
 
         yield "data: [DONE]\n\n"
-        await task  # ensure cleanup
+        await task
 
     return StreamingResponse(
         event_generator(),
@@ -640,18 +742,8 @@ async def pipeline_stream_sse(dataset_id: str, request: Request):
     )
 
 
-# ---------------------------------------------------------------------------
-# Batch semantic cleaning
-# ---------------------------------------------------------------------------
-
-
 @advanced_router.post("/cleaning/{dataset_id}/batch-semantic")
 async def batch_semantic_clean(dataset_id: str, request: Request) -> Dict[str, Any]:
-    """Apply multiple semantic cleaning operations in a single batch call.
-
-    Uses smart_cleaning.apply_cleaning (dict-based ops) so the frontend can
-    send the same {op, column, params} shape used by /cleaning/apply.
-    """
     body = await request.json()
     operations = body.get("operations", [])
     if not operations:
@@ -665,10 +757,8 @@ async def batch_semantic_clean(dataset_id: str, request: Request) -> Dict[str, A
 
     df = await _load_df(dataset_id, storage)
 
-    # Run blocking pandas in a thread so the event loop stays free
     cleaned, report = await asyncio.to_thread(apply_cleaning, df, operations)
 
-    # Save as new dataset CSV
     source_name = body.get("save_as") or f"semantic_cleaned_{dataset_id[:8]}"
     filename = f"{source_name}.csv"
     buf = io.StringIO()
@@ -678,7 +768,6 @@ async def batch_semantic_clean(dataset_id: str, request: Request) -> Dict[str, A
     ref = await storage.store_file(payload, filename)
     new_id = ref["dataset_id"]
 
-    # Build schema + cache so the Query page can consume it immediately
     cols: List[Dict[str, Any]] = []
     for c in cleaned.columns:
         dtype = str(cleaned[c].dtype)
@@ -690,13 +779,15 @@ async def batch_semantic_clean(dataset_id: str, request: Request) -> Dict[str, A
             inferred = "boolean"
         else:
             inferred = "categorical"
-        cols.append({
-            "name": c,
-            "dtype": dtype,
-            "inferred_type": inferred,
-            "null_pct": round(float(cleaned[c].isnull().mean() * 100), 2),
-            "unique_count": int(cleaned[c].nunique()),
-        })
+        cols.append(
+            {
+                "name": c,
+                "dtype": dtype,
+                "inferred_type": inferred,
+                "null_pct": round(float(cleaned[c].isnull().mean() * 100), 2),
+                "unique_count": int(cleaned[c].nunique()),
+            }
+        )
     new_schema = {
         "dataset_id": new_id,
         "name": source_name,
@@ -716,7 +807,11 @@ async def batch_semantic_clean(dataset_id: str, request: Request) -> Dict[str, A
         "rows": len(cleaned),
         "cols": len(cleaned.columns),
         "total_cells_modified": report.get("cells_modified", 0),
-        "operations_applied": len([s for s in report.get("steps", []) if s["status"] == "ok"]),
-        "operations_failed": len([s for s in report.get("steps", []) if s["status"] == "error"]),
+        "operations_applied": len(
+            [s for s in report.get("steps", []) if s["status"] == "ok"]
+        ),
+        "operations_failed": len(
+            [s for s in report.get("steps", []) if s["status"] == "error"]
+        ),
         "results": report.get("steps", []),
     }

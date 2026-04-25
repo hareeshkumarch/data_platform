@@ -25,7 +25,6 @@ from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 STATIC_PLANS: Dict[str, List[Dict]] = {
     "upload": [
         {
@@ -196,32 +195,34 @@ class OrchestratorAgent(BaseAgent):
         completed: set = set()
 
         if mode == "dynamic":
-            from backend.prompts.templates import ORCHESTRATOR_PROMPT, ORCHESTRATOR_SYSTEM
+            from backend.prompts.templates import (
+                ORCHESTRATOR_PROMPT,
+                ORCHESTRATOR_SYSTEM,
+            )
             from backend.models.schemas import LLMRequest, LLMMode
             from backend.services.llm_service import LLMService
             import json
-            
+
             schema = await self._cache.get_schema(dataset_id)
-            # Evaluate current dataset state to skip unnecessary steps
+
             quality_score = schema.get("quality_score", 100) if schema else 100
             col_count = len(schema.get("columns", [])) if schema else 0
 
             prompt = ORCHESTRATOR_PROMPT.format(
                 user_request=payload.get("question", "Full data analysis"),
-                dataset_state=json.dumps(schema) if schema else "Schema not yet loaded"
+                dataset_state=json.dumps(schema) if schema else "Schema not yet loaded",
             )
             req = LLMRequest(
                 prompt=prompt,
                 system_prompt=ORCHESTRATOR_SYSTEM,
                 mode=LLMMode.FAST,
-                temperature=0.1
+                temperature=0.1,
             )
             resp = await self._llm.complete(req)
             try:
                 plan_json, _ = LLMService.extract_json_with_preamble(resp.content)
                 steps = plan_json.get("steps", STATIC_PLANS["full"])
 
-                # Conditional Skipping: if data is clean and small, skip feature engineering
                 if quality_score > 90 and col_count < 10:
                     steps = [s for s in steps if s["agent"] != "feature"]
 
@@ -252,7 +253,6 @@ class OrchestratorAgent(BaseAgent):
                 continue
 
             if len(runnable) == 1:
-                # Inject dependencies for evaluator
                 s = runnable[0]
                 if s["agent"] == "evaluator" and "report" in results:
                     s["config"]["report"] = results["report"].data
@@ -283,22 +283,33 @@ class OrchestratorAgent(BaseAgent):
             await self._cache.set_task_progress(
                 correlation_id, done / total * 90, "running"
             )
-            
-        # Recursive Refinement Loop (max 1 refinement pass to prevent token burn)
-        evaluator_data = results.get("evaluator", AgentResult(agent=AgentType.EVALUATOR, success=False)).data or {}
+
+        evaluator_data = (
+            results.get(
+                "evaluator", AgentResult(agent=AgentType.EVALUATOR, success=False)
+            ).data
+            or {}
+        )
         if evaluator_data.get("satisfied") is False:
             refinement = evaluator_data.get("refinement_instruction", "")
             if refinement and refinement.lower() != "ready for delivery":
                 logger.info(f"Refinement triggered by Evaluator: {refinement}")
-                # Create a refined payload
+
                 refined_payload = payload.copy()
                 refined_payload["refinement_instruction"] = refinement
-                # Re-run Report Agent
-                r = await self._run_step({"step_id": 99, "agent": "report", "config": {}}, refined_payload, correlation_id)
+
+                r = await self._run_step(
+                    {"step_id": 99, "agent": "report", "config": {}},
+                    refined_payload,
+                    correlation_id,
+                )
                 results["report"] = r
-                
-                # Re-evaluate
-                eval_step = {"step_id": 100, "agent": "evaluator", "config": {"report": r.data}}
+
+                eval_step = {
+                    "step_id": 100,
+                    "agent": "evaluator",
+                    "config": {"report": r.data},
+                }
                 e_res = await self._run_step(eval_step, refined_payload, correlation_id)
                 results["evaluator"] = e_res
 
@@ -336,8 +347,9 @@ class OrchestratorAgent(BaseAgent):
             "model_override": global_payload.get("model"),
         }
 
-        # Advanced DAG explicit retry strategy config
-        max_retries = step.get("config", {}).get("max_retries", settings.CELERY_MAX_RETRIES)
+        max_retries = step.get("config", {}).get(
+            "max_retries", settings.CELERY_MAX_RETRIES
+        )
         fallback_agent_name = step.get("config", {}).get("fallback_agent")
 
         for attempt in range(1, max_retries + 1):
@@ -346,12 +358,19 @@ class OrchestratorAgent(BaseAgent):
                 return result
             if attempt < max_retries:
                 wait = min(settings.CELERY_RETRY_BACKOFF * (2 ** (attempt - 1)), 30)
-                logger.warning("Step retry", agent=name, attempt=attempt, wait=wait, error=result.error)
+                logger.warning(
+                    "Step retry",
+                    agent=name,
+                    attempt=attempt,
+                    wait=wait,
+                    error=result.error,
+                )
                 await asyncio.sleep(wait)
 
-        # Fallback mechanism if main agent fails
         if not result.success and fallback_agent_name:
-            logger.warning(f"Agent {name} failed after {max_retries} attempts. Triggering fallback: {fallback_agent_name}")
+            logger.warning(
+                f"Agent {name} failed after {max_retries} attempts. Triggering fallback: {fallback_agent_name}"
+            )
             fallback_agent = self._agents.get(fallback_agent_name)
             if fallback_agent:
                 return await fallback_agent.execute(step_payload, correlation_id)

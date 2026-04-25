@@ -339,7 +339,7 @@ const DataCleaning = () => {
           <div className="flex flex-wrap items-end gap-4 justify-between">
             <div className="flex items-end gap-3 min-w-[260px]">
               <div>
-                <label className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold block mb-1.5">
+                <label className="text-[12px] uppercase tracking-wide text-muted-foreground font-semibold block mb-1.5">
                   Dataset
                 </label>
                 <Select value={selectedId ?? ""} onValueChange={setSelectedId}>
@@ -451,6 +451,9 @@ const DataCleaning = () => {
 
           <div className="flex-1" />
 
+          <Button variant="outline" size="sm" onClick={() => selectAll(["critical", "warning", "info"])}>
+            Select all ({filtered.length})
+          </Button>
           <Button variant="outline" size="sm" onClick={() => selectAll("auto")}>
             <Sparkles className="h-3.5 w-3.5" />
             Select auto-safe
@@ -471,7 +474,7 @@ const DataCleaning = () => {
           </Button>
           {selected.size > 0 && (
             <Button variant="ghost" size="sm" onClick={clearSelection}>
-              <X className="h-3.5 w-3.5" /> Clear
+              <X className="h-3.5 w-3.5" /> Clear ({selected.size})
             </Button>
           )}
         </Card>
@@ -492,7 +495,19 @@ const DataCleaning = () => {
               </div>
               <div className="text-sm mt-1">
                 Your data is already in good shape. Re-run analysis after new
-                uploads.
+                uploads or try the semantic operations builder below.
+              </div>
+            </Card>
+          )}
+
+          {!suggestLoading && !selectedId && (
+            <Card className="p-10 text-center text-muted-foreground">
+              <Database className="h-10 w-10 mx-auto mb-3 text-muted-foreground/30" />
+              <div className="font-semibold text-foreground">
+                No dataset selected
+              </div>
+              <div className="text-sm mt-1">
+                Choose a dataset from the dropdown above to scan for cleaning opportunities.
               </div>
             </Card>
           )}
@@ -533,25 +548,25 @@ const DataCleaning = () => {
                       )}
                     />
                     <span className="font-medium text-sm">{s.label}</span>
-                    <Badge variant="outline" className={cn("text-[10px]", style.badge)}>
+                    <Badge variant="outline" className={cn("text-[11px]", style.badge)}>
                       {style.label}
                     </Badge>
                     <Badge
                       variant="outline"
                       className={cn(
-                        "text-[10px]",
+                        "text-[11px]",
                         semanticColor[s.semantic_type] ?? "bg-muted"
                       )}
                     >
                       {s.semantic_type}
                     </Badge>
-                    <Badge variant="outline" className="text-[10px] uppercase">
+                    <Badge variant="outline" className="text-[11px] uppercase">
                       {s.category}
                     </Badge>
                     {s.auto_safe && (
                       <Badge
                         variant="outline"
-                        className="text-[10px] bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
+                        className="text-[11px] bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
                       >
                         auto-safe
                       </Badge>
@@ -754,22 +769,109 @@ const DataCleaning = () => {
 // Semantic Operations Builder
 // ---------------------------------------------------------------------------
 
-const SEMANTIC_OPS = [
+type ParamKind = "string" | "int" | "float" | "enum";
+interface ParamSpec {
+  name: string;
+  kind: ParamKind;
+  label?: string;
+  placeholder?: string;
+  defaultValue?: string;
+  options?: string[]; // for kind="enum"
+  min?: number;
+  max?: number;
+  step?: number;
+  required?: boolean;
+}
+
+interface OpDef {
+  id: string;
+  label: string;
+  icon: typeof Mail;
+  desc: string;
+  category: string;
+  needsColumn: boolean;
+  params?: ParamSpec[];
+}
+
+const SEMANTIC_OPS: OpDef[] = [
   { id: "validate_emails", label: "Validate Emails", icon: Mail, desc: "Flag or remove invalid email addresses", category: "validation", needsColumn: true },
   { id: "validate_urls", label: "Validate URLs", icon: Globe, desc: "Flag or remove malformed URLs", category: "validation", needsColumn: true },
   { id: "validate_phones", label: "Validate Phones", icon: Phone, desc: "Flag or remove invalid phone numbers", category: "validation", needsColumn: true },
   { id: "normalize_currency", label: "Normalize Currency", icon: DollarSign, desc: "Strip symbols ($, €, ¥) and convert to numeric", category: "normalization", needsColumn: true },
   { id: "standardize_dates", label: "Standardize Dates", icon: Calendar, desc: "Convert to consistent date format (ISO 8601)", category: "normalization", needsColumn: true },
-  { id: "regex_replace", label: "Regex Replace", icon: Regex, desc: "Apply regex pattern replacement", category: "transformation", needsColumn: true, needsParams: ["pattern", "replacement"] },
+  {
+    id: "regex_replace", label: "Regex Replace", icon: Regex, desc: "Apply regex pattern replacement", category: "transformation", needsColumn: true,
+    params: [
+      { name: "pattern", kind: "string", placeholder: "e.g. \\s+", required: true },
+      { name: "replacement", kind: "string", placeholder: "replacement", defaultValue: "" },
+    ],
+  },
   { id: "remove_html_tags", label: "Strip HTML", icon: Braces, desc: "Remove HTML/XML tags from text", category: "cleaning", needsColumn: true },
   { id: "normalize_whitespace", label: "Normalize Whitespace", icon: Eraser, desc: "Collapse multiple spaces, trim edges", category: "cleaning", needsColumn: true },
   { id: "extract_numbers", label: "Extract Numbers", icon: Hash, desc: "Extract first numeric value from text", category: "extraction", needsColumn: true },
-  { id: "round_numbers", label: "Round Numbers", icon: Hash, desc: "Round numeric values to N decimals", category: "transformation", needsColumn: true, needsParams: ["decimals"] },
-  { id: "encode_categoricals", label: "Encode Categoricals", icon: Binary, desc: "One-hot or label encode categorical columns", category: "encoding", needsColumn: true, needsParams: ["method"] },
-  { id: "bin_numeric", label: "Bin Numeric", icon: Settings2, desc: "Bucket numeric values into bins", category: "transformation", needsColumn: true, needsParams: ["bins"] },
+  {
+    id: "round_numbers", label: "Round Numbers", icon: Hash, desc: "Round numeric values to N decimals", category: "transformation", needsColumn: true,
+    params: [{ name: "decimals", kind: "int", defaultValue: "2", min: 0, max: 10, required: true }],
+  },
+  {
+    id: "encode_categoricals", label: "Encode Categoricals", icon: Binary, desc: "One-hot or label encode categorical columns", category: "encoding", needsColumn: true,
+    params: [{ name: "method", kind: "enum", options: ["one_hot", "label", "ordinal"], defaultValue: "one_hot", required: true }],
+  },
+  {
+    id: "bin_numeric", label: "Bin Numeric", icon: Settings2, desc: "Bucket numeric values into bins", category: "transformation", needsColumn: true,
+    params: [{ name: "bins", kind: "int", defaultValue: "5", min: 2, max: 50, required: true }],
+  },
   { id: "log_transform", label: "Log Transform", icon: Settings2, desc: "Apply log(1+x) transform to reduce skewness", category: "transformation", needsColumn: true },
-  { id: "deduplicate_fuzzy", label: "Fuzzy Dedup", icon: Type, desc: "Merge near-duplicate text values", category: "deduplication", needsColumn: true, needsParams: ["threshold"] },
+  {
+    id: "deduplicate_fuzzy", label: "Fuzzy Dedup", icon: Type, desc: "Merge near-duplicate text values", category: "deduplication", needsColumn: true,
+    params: [{ name: "threshold", kind: "float", defaultValue: "0.85", min: 0, max: 1, step: 0.01, required: true }],
+  },
 ];
+
+/** Coerce param map into correctly-typed values ready to ship to the backend. */
+const coerceParams = (def: OpDef | undefined, raw: Record<string, string>): Record<string, unknown> => {
+  const specs = def?.params ?? [];
+  const out: Record<string, unknown> = {};
+  for (const spec of specs) {
+    const v = raw[spec.name];
+    if (v === undefined || v === null || v === "") {
+      if (spec.defaultValue !== undefined && spec.defaultValue !== "") {
+        out[spec.name] = spec.kind === "int" ? parseInt(spec.defaultValue, 10)
+          : spec.kind === "float" ? parseFloat(spec.defaultValue)
+          : spec.defaultValue;
+      }
+      continue;
+    }
+    if (spec.kind === "int") {
+      const n = parseInt(v, 10);
+      out[spec.name] = Number.isFinite(n) ? n : 0;
+    } else if (spec.kind === "float") {
+      const n = parseFloat(v);
+      out[spec.name] = Number.isFinite(n) ? n : 0;
+    } else {
+      out[spec.name] = v;
+    }
+  }
+  return out;
+};
+
+/** Returns error message if op is invalid, else null. */
+const validateOp = (def: OpDef | undefined, op: PendingOp): string | null => {
+  if (!def) return "Unknown operation";
+  if (def.needsColumn && !op.column) return `${def.label}: choose a column`;
+  for (const spec of def.params ?? []) {
+    if (!spec.required) continue;
+    const v = op.params[spec.name] ?? spec.defaultValue ?? "";
+    if (v === "") return `${def.label}: ${spec.name} is required`;
+    if (spec.kind === "int" || spec.kind === "float") {
+      const n = spec.kind === "int" ? parseInt(v, 10) : parseFloat(v);
+      if (!Number.isFinite(n)) return `${def.label}: ${spec.name} must be numeric`;
+      if (spec.min !== undefined && n < spec.min) return `${def.label}: ${spec.name} ≥ ${spec.min}`;
+      if (spec.max !== undefined && n > spec.max) return `${def.label}: ${spec.name} ≤ ${spec.max}`;
+    }
+  }
+  return null;
+};
 
 const CATEGORY_COLORS: Record<string, string> = {
   validation: "bg-pink-500/10 text-pink-600 border-pink-500/30",
@@ -809,7 +911,12 @@ const SemanticOpsBuilder = ({ datasetId }: { datasetId: string | null }) => {
 
   const addOp = useCallback((opId: string) => {
     const uid = `op_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    setOps(prev => [...prev, { uid, opId, column: columns[0] || "", params: {} }]);
+    const def = SEMANTIC_OPS.find(d => d.id === opId);
+    const params: Record<string, string> = {};
+    for (const spec of def?.params ?? []) {
+      if (spec.defaultValue !== undefined) params[spec.name] = spec.defaultValue;
+    }
+    setOps(prev => [...prev, { uid, opId, column: columns[0] || "", params }]);
   }, [columns]);
 
   const removeOp = useCallback((uid: string) => {
@@ -824,18 +931,30 @@ const SemanticOpsBuilder = ({ datasetId }: { datasetId: string | null }) => {
     }));
   }, []);
 
-  const runSemanticPreview = async () => {
-    if (!datasetId || ops.length === 0) return;
-    setApplying(true);
-    try {
-      const operations = ops.map(o => ({
+  const buildOperationsPayload = (): { ok: true; ops: any[] } | { ok: false; error: string } => {
+    const payload: any[] = [];
+    for (const o of ops) {
+      const def = SEMANTIC_OPS.find(d => d.id === o.opId);
+      const err = validateOp(def, o);
+      if (err) return { ok: false, error: err };
+      payload.push({
         op: o.opId,
         column: o.column || null,
-        params: o.params,
-      }));
+        params: coerceParams(def, o.params),
+      });
+    }
+    return { ok: true, ops: payload };
+  };
+
+  const runSemanticPreview = async () => {
+    if (!datasetId || ops.length === 0) return;
+    const built = buildOperationsPayload();
+    if (!built.ok) { toast.error(built.error); return; }
+    setApplying(true);
+    try {
       const result = await apiFetch<PreviewResponse>(
         `/cleaning/preview/${datasetId}`,
-        { method: "POST", body: JSON.stringify({ operations }) }
+        { method: "POST", body: JSON.stringify({ operations: built.ops }) }
       );
       setPreviewResult(result);
       setShowPreviewDialog(true);
@@ -848,21 +967,19 @@ const SemanticOpsBuilder = ({ datasetId }: { datasetId: string | null }) => {
 
   const runSemanticApply = async () => {
     if (!datasetId || ops.length === 0) return;
+    const built = buildOperationsPayload();
+    if (!built.ok) { toast.error(built.error); return; }
     setApplying(true);
     try {
-      const operations = ops.map(o => ({
-        op: o.opId,
-        column: o.column || null,
-        params: o.params,
-      }));
       const result = await apiFetch<ApplyResponse>(
         `/cleaning/apply/${datasetId}`,
-        { method: "POST", body: JSON.stringify({ operations }) }
+        { method: "POST", body: JSON.stringify({ operations: built.ops }) }
       );
       toast.success(`Semantic cleaning applied: ${result.name}`);
       queryClient.invalidateQueries({ queryKey: ["datasets"] });
       setOps([]);
       setPreviewResult(null);
+      setShowPreviewDialog(false);
     } catch (err) {
       toast.error((err as Error).message || "Apply failed");
     } finally {
@@ -879,13 +996,21 @@ const SemanticOpsBuilder = ({ datasetId }: { datasetId: string | null }) => {
 
   if (!datasetId) return null;
 
+  const datasetColCount = Array.isArray(columns) ? columns.length : 0;
   return (
     <Card className="p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-accent" />
-          Semantic Cleaning Operations
-        </h3>
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-accent" />
+            Semantic Cleaning Operations
+          </h3>
+          {datasetId && (
+            <Badge variant="outline" className="text-[10px] font-mono">
+              <Database className="h-3 w-3 mr-1" /> {datasetColCount} columns
+            </Badge>
+          )}
+        </div>
         <div className="flex items-center gap-1 p-0.5 rounded-lg bg-surface border border-border">
           {categories.map(c => (
             <button
@@ -964,15 +1089,42 @@ const SemanticOpsBuilder = ({ datasetId }: { datasetId: string | null }) => {
                     </SelectContent>
                   </Select>
 
-                  {def.needsParams?.map(p => (
-                    <Input
-                      key={p}
-                      placeholder={p}
-                      value={op.params[p] || ""}
-                      onChange={e => updateOp(op.uid, p, e.target.value)}
-                      className="w-[100px] h-7 text-[11px]"
-                    />
-                  ))}
+                  {(def.params ?? []).map(spec => {
+                    const val = op.params[spec.name] ?? "";
+                    if (spec.kind === "enum") {
+                      return (
+                        <Select
+                          key={spec.name}
+                          value={val}
+                          onValueChange={(v) => updateOp(op.uid, spec.name, v)}
+                        >
+                          <SelectTrigger className="w-[130px] h-7 text-[11px]">
+                            <SelectValue placeholder={spec.name} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(spec.options ?? []).map((o) => (
+                              <SelectItem key={o} value={o} className="text-[11px]">{o}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      );
+                    }
+                    const isNum = spec.kind === "int" || spec.kind === "float";
+                    return (
+                      <Input
+                        key={spec.name}
+                        placeholder={spec.placeholder ?? spec.name}
+                        value={val}
+                        type={isNum ? "number" : "text"}
+                        inputMode={isNum ? "decimal" : "text"}
+                        step={spec.step ?? (spec.kind === "float" ? 0.01 : 1)}
+                        min={spec.min}
+                        max={spec.max}
+                        onChange={e => updateOp(op.uid, spec.name, e.target.value)}
+                        className={cn("h-7 text-[11px]", isNum ? "w-[90px]" : "w-[130px]")}
+                      />
+                    );
+                  })}
 
                   <div className="flex-1" />
                   <button

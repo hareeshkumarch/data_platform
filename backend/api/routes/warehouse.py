@@ -1,5 +1,3 @@
-"""Warehouse (SQL executor) endpoints."""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -35,5 +33,5 @@ async def run_query(body: SqlQueryRequest):
         return SQLWarehouse.get().execute(body.sql, body.limit)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
-    except Exception as exc:  # pragma: no cover - surfaces DB errors to the UI
+    except Exception as exc:
         raise HTTPException(500, f"Query failed: {exc}")

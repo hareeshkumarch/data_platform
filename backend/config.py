@@ -1,5 +1,3 @@
-"""Runtime configuration loaded from environment variables."""
-
 from functools import lru_cache
 from typing import List, Optional
 
@@ -7,9 +5,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings. All values sourced from .env / environment."""
-
-    # App
     APP_NAME: str = "Lumen Data Intelligence Platform"
     APP_VERSION: str = "2.0.0"
     DEBUG: bool = False
@@ -18,7 +13,6 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = ["*"]
     MAX_UPLOAD_SIZE_MB: int = 500
 
-    # LLM provider credentials
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
@@ -30,38 +24,42 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 4096
     LLM_MAX_TOKENS_REPORT: int = 8192
 
-    # Storage / SQL
     DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/lumen"
     UPLOAD_DIR: str = "/tmp/uploads"
     FAISS_INDEX_PATH: str = "/tmp/faiss_indexes"
 
-    # Data processing
     MAX_CHUNK_ROWS: int = 10_000
     SAMPLE_THRESHOLD: int = 100_000
     SAMPLE_SIZE: int = 50_000
     MAX_CARDINALITY: int = 50
     CORRELATION_MIN_ROWS: int = 30
 
-    # Cache TTLs (seconds)
     CACHE_TTL_DEFAULT: int = 3600
     CACHE_TTL_LLM: int = 86400
     CACHE_TTL_QUERY: int = 1800
     CACHE_TTL_CHART: int = 900
 
-    # Task retry
+    CACHE_BACKEND: str = "memory"
+    REDIS_URL: Optional[str] = None
     TASK_MAX_RETRIES: int = 3
     TASK_RETRY_BACKOFF: int = 5
-    # Legacy aliases still referenced by some agents
     CELERY_MAX_RETRIES: int = 3
     CELERY_RETRY_BACKOFF: int = 5
 
-    # Metrics
     ENABLE_PROMETHEUS: bool = False
     PROMETHEUS_PORT: int = 9090
 
-    # Async processing
     ANALYTICS_THREAD_POOL_SIZE: int = 4
     ANALYTICS_CACHE_TTL: int = 600
+
+    CODE_EXEC_TIMEOUT_SEC: int = 10
+    CODE_EXEC_MAX_ROWS: int = 500
+
+    QUERY_MAX_RETRIES: int = 3
+    QUERY_RETRY_TEMP_ESCALATION: float = 0.3
+
+    SESSION_MEMORY_MAX_TURNS: int = 10
+    SESSION_MEMORY_TTL: int = 3600
 
     model_config = SettingsConfigDict(
         env_file=".env", case_sensitive=True, extra="ignore"
