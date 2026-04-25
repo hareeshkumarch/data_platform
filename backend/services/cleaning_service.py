@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import re
 
 import numpy as np
 import pandas as pd
@@ -14,7 +13,6 @@ from backend.utils.data_utils import (
     PHONE_RE as _PHONE_PATTERN,
     CURRENCY_STRIP_RE as _CURRENCY_STRIP,
     HTML_TAGS_RE as _HTML_TAGS,
-    MULTI_SPACE_RE as _MULTI_SPACE,
     cleaning_fill_missing,
     cleaning_trim_strings,
     cleaning_standardize_case,
