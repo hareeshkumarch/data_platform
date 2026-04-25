@@ -4,7 +4,6 @@ import asyncio
 import base64
 import io
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -12,7 +11,6 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from backend.config import settings
 from backend.services.analytics import AdvancedAnalytics
 from backend.services.cache_service import CacheService
 from backend.services.cleaning_service import CleaningOp, clean_dataframe

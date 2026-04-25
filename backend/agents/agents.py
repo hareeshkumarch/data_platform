@@ -709,7 +709,7 @@ _FORBIDDEN_ATTRS = {
     "__reduce_ex__",
     "__init_subclass__",
 }
-
+_FORBIDDEN_NAMES = {"eval", "exec", "open", "compile", "__import__", "globals", "locals"}
 
 def _validate_code_ast(code_str: str) -> None:
     tree = ast.parse(code_str)

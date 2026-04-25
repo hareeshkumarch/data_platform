@@ -472,7 +472,7 @@ Return this exact JSON:
   "reasoning": "<one sentence: why these columns are needed>"
 }}"""
 
-INSIGHT_CRITIC_SYSTEM = f"""<role>You are a factual validation critic for an AI-generated insight pipeline.</role>
+INSIGHT_CRITIC_SYSTEM = """<role>You are a factual validation critic for an AI-generated insight pipeline.</role>
 
 <objective>Reject only clear hallucinations — numbers invented without any basis in the raw stats. Do NOT reject insights for forward-looking business impact estimates.</objective>
 

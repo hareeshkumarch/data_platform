@@ -123,7 +123,12 @@ class SQLWarehouse:
     def _seed_sales_performance(self) -> None:
         assert self.engine is not None
         with self.engine.begin() as conn:
-            conn.execute(text())
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sales_performance ("
+                "region VARCHAR(50), product VARCHAR(50), segment VARCHAR(50), "
+                "month DATE, revenue FLOAT, cost FLOAT, customers INT"
+                ")"
+            ))
             count = (
                 conn.execute(text("SELECT COUNT(*) FROM sales_performance")).scalar()
                 or 0
@@ -180,7 +185,12 @@ class SQLWarehouse:
         if not self.enabled or self.engine is None:
             return []
         with self.engine.connect() as conn:
-            rows = conn.execute(text()).fetchall()
+            rows = conn.execute(text(
+                "SELECT table_name, "
+                "(SELECT count(*) FROM information_schema.columns WHERE table_name = t.table_name) "
+                "FROM information_schema.tables t "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE';"
+            )).fetchall()
         return [{"name": r[0], "columns": int(r[1] or 0)} for r in rows]
 
     def describe_table(self, table_name: str) -> Dict[str, Any]:
@@ -191,7 +201,11 @@ class SQLWarehouse:
             raise ValueError("Invalid table name.")
         with self.engine.connect() as conn:
             cols = conn.execute(
-                text(),
+                text(
+                    "SELECT column_name, data_type, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_name = :t AND table_schema = 'public'"
+                ),
                 {"t": safe},
             ).fetchall()
             count = conn.execute(text(f"SELECT COUNT(*) FROM {safe}")).scalar() or 0

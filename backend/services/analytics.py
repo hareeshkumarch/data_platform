@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import math
 
 import numpy as np
@@ -12,7 +12,6 @@ from backend.utils.data_utils import (
     _safe_list,
     _corr_strength,
     _entropy,
-    _mape,
     _growth_rate,
     compute_distribution,
 )
